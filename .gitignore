@@ -47,5 +47,5 @@ Starlink.html
 start_realtime_backend.bat
 start_realtime_backend.ps1
 
-# Memory system
+# Claude memory
 .claude/
