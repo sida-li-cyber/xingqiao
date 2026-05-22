@@ -1,0 +1,10 @@
+host: "0.0.0.0"
+port: 8000
+reload: false
+log_level: "info"
+allowed_origins:
+  - "*"
+client_ws_path: "/ws/client"
+core_ws_path: "/ws/core"
+state_message_type: "state_update"
+command_message_type: "command"

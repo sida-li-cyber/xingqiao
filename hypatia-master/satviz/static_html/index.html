@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Satellite Network Visualization</title>
+
+    <!-- CesiumJS 1.141 -->
+    <script src="https://cesium.com/downloads/cesiumjs/releases/1.141/Build/Cesium/Cesium.js"></script>
+    <link href="https://cesium.com/downloads/cesiumjs/releases/1.141/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+
+        #cesiumContainer {
+            width: 100%;
+            height: 100%;
+            position: relative;
+        }
+
+        /* Info banner at top-left */
+        #infoBanner {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.75);
+            color: #ccc;
+            padding: 8px 14px;
+            border-radius: 4px;
+            z-index: 10;
+            font-size: 12px;
+            pointer-events: none;
+        }
+
+        /* Control Panel */
+        #controlPanel {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 340px;
+            background: rgba(0, 0, 0, 0.82);
+            color: #fff;
+            padding: 14px;
+            border-radius: 6px;
+            z-index: 10;
+            box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
+            font-size: 12.5px;
+            max-height: calc(100vh - 20px);
+            overflow-y: auto;
+        }
+
+        .control-section {
+            margin-bottom: 14px;
+            padding-bottom: 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+        }
+
+        .control-section:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .control-label {
+            font-weight: 600;
+            margin-bottom: 6px;
+            display: block;
+            color: #ddd;
+            font-size: 12px;
+        }
+
+        /* Mode buttons */
+        .mode-selector {
+            display: flex;
+            gap: 5px;
+        }
+
+        .mode-btn {
+            flex: 1;
+            padding: 7px 10px;
+            border: 2px solid #555;
+            background: rgba(255, 255, 255, 0.08);
+            color: #ccc;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: all 0.2s;
+        }
+
+        .mode-btn.active {
+            background: #2196F3;
+            border-color: #2196F3;
+            color: #fff;
+        }
+
+        .mode-btn:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        /* Buttons */
+        button {
+            padding: 7px 10px;
+            background: #2196F3;
+            color: #fff;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            transition: background 0.2s;
+            width: 100%;
+            margin-bottom: 6px;
+        }
+
+        button:hover {
+            background: #1976D2;
+        }
+
+        button:disabled {
+            background: #777;
+            cursor: not-allowed;
+        }
+
+        button.danger {
+            background: #f44336;
+        }
+
+        button.danger:hover {
+            background: #da190b;
+        }
+
+        /* Range slider */
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #555;
+            outline: none;
+            -webkit-appearance: none;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #2196F3;
+            cursor: pointer;
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            background: #2196F3;
+            cursor: pointer;
+            border: none;
+        }
+
+        /* Selects */
+        select {
+            width: 100%;
+            padding: 7px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 4px;
+            margin-bottom: 6px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+
+        select option {
+            background: #333;
+            color: #fff;
+        }
+
+        /* Text/number inputs */
+        input[type="text"],
+        input[type="number"] {
+            width: 100%;
+            padding: 7px;
+            background: rgba(255, 255, 255, 0.08);
+            color: #fff;
+            border: 1px solid #555;
+            border-radius: 4px;
+            margin-bottom: 6px;
+            font-size: 12px;
+        }
+
+        input[type="text"]::placeholder,
+        input[type="number"]::placeholder {
+            color: #888;
+        }
+
+        /* Info rows */
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            font-size: 12px;
+        }
+
+        .info-label {
+            color: #aaa;
+        }
+
+        .info-value {
+            color: #fff;
+            font-weight: 500;
+        }
+
+        /* Status indicator */
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .status-connected {
+            background: #4caf50;
+            box-shadow: 0 0 4px #4caf50;
+        }
+
+        .status-disconnected {
+            background: #f44336;
+            box-shadow: 0 0 4px #f44336;
+        }
+
+        /* Timeline */
+        #timelineContainer {
+            margin: 8px 0;
+        }
+
+        /* Filter section */
+        .filter-list {
+            max-height: 140px;
+            overflow-y: auto;
+            background: rgba(255, 255, 255, 0.04);
+            padding: 6px;
+            border-radius: 4px;
+            margin-bottom: 6px;
+        }
+
+        .filter-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 4px;
+            font-size: 11.5px;
+        }
+
+        .filter-item input[type="checkbox"] {
+            margin-right: 6px;
+            cursor: pointer;
+        }
+
+        .filter-item label {
+            cursor: pointer;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* Speed display */
+        #speedDisplay {
+            text-align: center;
+            font-weight: 600;
+            color: #2196F3;
+            margin-top: 4px;
+        }
+
+        /* Connection status */
+        .connection-status {
+            padding: 7px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.04);
+            margin-bottom: 10px;
+            font-size: 12px;
+        }
+
+        /* Token status */
+        .token-status {
+            font-size: 11px;
+            margin-top: 4px;
+        }
+
+        /* Scrollbar styling */
+        #controlPanel::-webkit-scrollbar {
+            width: 5px;
+        }
+
+        #controlPanel::-webkit-scrollbar-track {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        #controlPanel::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.2);
+            border-radius: 3px;
+        }
+
+        .filter-list::-webkit-scrollbar {
+            width: 4px;
+        }
+
+        .filter-list::-webkit-scrollbar-track {
+            background: transparent;
+        }
+
+        .filter-list::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.15);
+            border-radius: 2px;
+        }
+
+        /* Responsive */
+        @media (max-width: 800px) {
+            #controlPanel {
+                width: 280px;
+                font-size: 11px;
+                padding: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="cesiumContainer"></div>
+
+    <!-- Info banner (non-interactive) -->
+    <div id="infoBanner">
+        Satellite Network Visualization | CesiumJS 1.141
+    </div>
+
+    <!-- Control Panel -->
+    <div id="controlPanel">
+        <!-- Connection Status -->
+        <div class="connection-status">
+            <div class="info-row">
+                <span class="info-label">Connection:</span>
+                <span>
+                    <span class="status-indicator status-disconnected" id="connectionIndicator"></span>
+                    <span id="connectionStatus">Disconnected</span>
+                </span>
+            </div>
+        </div>
+
+        <!-- Mode Selection -->
+        <div class="control-section">
+            <label class="control-label">Visualization Mode</label>
+            <div class="mode-selector">
+                <button class="mode-btn active" id="modeRealtime">Realtime</button>
+                <button class="mode-btn" id="modeOffline">Offline</button>
+            </div>
+        </div>
+
+        <!-- ======================== -->
+        <!-- Realtime Controls        -->
+        <!-- ======================== -->
+        <div id="realtimeControls">
+            <!-- Playback Control -->
+            <div class="control-section">
+                <label class="control-label">Playback</label>
+                <div style="display: flex; gap: 5px;">
+                    <button id="playPauseBtn" style="flex: 2;">▶ Play</button>
+                    <button id="stopBtn" style="flex: 1;">⏹ Stop</button>
+                    <button id="resetBtn" style="flex: 1;">↻ Reset</button>
+                </div>
+            </div>
+
+            <!-- Speed Control -->
+            <div class="control-section">
+                <label class="control-label">Speed Multiplier</label>
+                <input type="range" id="speedSlider" min="0.1" max="10" step="0.1" value="1">
+                <div id="speedDisplay">1.0x</div>
+            </div>
+
+            <!-- Timeline Control -->
+            <div class="control-section">
+                <label class="control-label">Timeline</label>
+                <div id="timelineContainer">
+                    <input type="range" id="timelineSlider" min="0" max="100" value="0" style="width: 100%; margin-bottom: 4px;">
+                    <div style="display: flex; gap: 6px; align-items: center;">
+                        <input type="number" id="timelineInput" min="0" step="1" placeholder="Jump to..." style="flex: 1; margin-bottom: 0;">
+                        <span class="info-value" id="simTime" style="flex: 1; text-align: right; white-space: nowrap;">0s</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Metrics Selection -->
+            <div class="control-section">
+                <label class="control-label">Metrics Display</label>
+                <select id="metricsSelect">
+                    <option value="none">None</option>
+                    <option value="bandwidth">Bandwidth Utilization</option>
+                    <option value="latency">Latency</option>
+                    <option value="loss_rate">Packet Loss Rate</option>
+                    <option value="link_status">Link Status (Active/Inactive)</option>
+                </select>
+            </div>
+
+            <!-- Satellite Filter -->
+            <div class="control-section">
+                <label class="control-label">Satellite Filter</label>
+                <input type="text" id="satelliteSearch" placeholder="Search satellite...">
+                <div class="filter-list" id="satelliteFilterList">
+                    <div style="color: #888; text-align: center; padding: 10px;">Waiting for data...</div>
+                </div>
+                <div style="display: flex; gap: 5px;">
+                    <button id="selectAllSatellites" style="flex: 1;">Select All</button>
+                    <button id="deselectAllSatellites" class="danger" style="flex: 1;">Deselect All</button>
+                </div>
+            </div>
+
+            <!-- Ground Station Filter -->
+            <div class="control-section">
+                <label class="control-label">Ground Station Filter</label>
+                <input type="text" id="stationSearch" placeholder="Search station...">
+                <div class="filter-list" id="stationFilterList">
+                    <div style="color: #888; text-align: center; padding: 10px;">Waiting for data...</div>
+                </div>
+                <div style="display: flex; gap: 5px;">
+                    <button id="selectAllStations" style="flex: 1;">Select All</button>
+                    <button id="deselectAllStations" class="danger" style="flex: 1;">Deselect All</button>
+                </div>
+            </div>
+
+            <!-- Statistics -->
+            <div class="control-section">
+                <label class="control-label">Statistics</label>
+                <div class="info-row">
+                    <span class="info-label">Satellites:</span>
+                    <span class="info-value" id="satCount">0</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Ground Stations:</span>
+                    <span class="info-value" id="staCount">0</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Links:</span>
+                    <span class="info-value" id="linkCount">0</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">FPS:</span>
+                    <span class="info-value" id="fpsCounter">0 FPS</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- ======================== -->
+        <!-- Offline Controls         -->
+        <!-- ======================== -->
+        <div id="offlineControls" style="display: none;">
+            <div class="control-section">
+                <label class="control-label">Cesium Ion Access Token</label>
+                <input type="text" id="cesiumToken" placeholder="Enter your Cesium Ion token...">
+                <div class="token-status">
+                    <span id="tokenStatus" style="color: #888;">Not set</span>
+                </div>
+                <button id="saveCesiumToken" style="margin-top: 6px;">Save Token</button>
+            </div>
+
+            <div class="control-section">
+                <label class="control-label">Offline CZML Data</label>
+                <input type="text" id="czmlFilePath" placeholder="URL or path to CZML file...">
+                <div style="display: flex; gap: 5px;">
+                    <button id="loadOfflineData" style="flex: 1;">Load from URL</button>
+                    <button id="loadCzmlFromLocal" style="flex: 1;">Open Local File</button>
+                </div>
+                <div style="margin-top: 6px; font-size: 11px;">
+                    <span id="offlineStatus" style="color: #888;">Idle</span>
+                </div>
+            </div>
+
+            <div class="control-section" style="border-bottom: none;">
+                <label class="control-label">How to get a Cesium Ion token</label>
+                <ol style="font-size: 11px; color: #aaa; padding-left: 16px; line-height: 1.6;">
+                    <li>Go to <a href="https://ion.cesium.com/signup" target="_blank" style="color: #2196F3;">ion.cesium.com</a></li>
+                    <li>Sign up for a free account</li>
+                    <li>Go to "Access Tokens" tab</li>
+                    <li>Copy your default token and paste above</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <!-- JavaScript Modules -->
+    <script src="../js/websocket.js"></script>
+    <script src="../js/cesium-manager.js"></script>
+    <script src="../js/ui-controller.js"></script>
+    <script src="../js/app.js"></script>
+</body>
+</html>
