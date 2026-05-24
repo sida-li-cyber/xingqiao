@@ -59,14 +59,28 @@ class CesiumManager {
             this.scene = this.viewer.scene;
 
             // Configure scene
-            this.scene.backgroundColor = Cesium.Color.BLACK;
+            this.scene.backgroundColor = Cesium.Color.fromCssColorString('#0a1628');
             this.scene.highDynamicRange = false;
 
-            // Remove default imagery and add a dark-style base map
+            // Disable day/night lighting so the entire globe surface is uniformly
+            // visible — satellites and links stay visible against the Earth at all
+            // longitudes, not just the sunlit hemisphere.
+            this.scene.globe.enableLighting = false;
+            // Light base color as fallback before imagery tiles load.
+            this.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a3a5c');
+
+            // Replace default (Bing) imagery with NaturalEarthII tiles loaded
+            // via UrlTemplateImageryProvider.  Uses <img> tags (no CORS) so
+            // the tilemapresource.xml XHR step is skipped entirely.
+            // Use the full CDN URL directly instead of buildModuleUrl to
+            // guarantee the {z}/{x}/{reverseY} template variables stay
+            // literal and aren't percent-encoded.
             this.viewer.imageryLayers.removeAll();
             this.viewer.imageryLayers.addImageryProvider(
-                new Cesium.TileMapServiceImageryProvider({
-                    url: Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII'),
+                new Cesium.UrlTemplateImageryProvider({
+                    url: 'https://cesium.com/downloads/cesiumjs/releases/1.141/Build/Cesium/Assets/Textures/NaturalEarthII/{z}/{x}/{reverseY}.jpg',
+                    tilingScheme: new Cesium.GeographicTilingScheme(),
+                    maximumLevel: 2,
                 })
             );
 
@@ -75,6 +89,24 @@ class CesiumManager {
                 destination: Cesium.Cartesian3.fromDegrees(0, 20, 25000000),
                 duration: 2,
             });
+
+            // Move InfoBox to top-left so it doesn't overlap the control panel.
+            // Cesium 1.141 defaults: position:absolute; top:50px; right:0;
+            // border-right:none.
+            const ib = this.viewer.container.querySelector('.cesium-infoBox');
+            if (ib) {
+                ib.style.setProperty('left', '10px', 'important');
+                ib.style.setProperty('right', 'auto', 'important');
+                ib.style.setProperty('top', '50px', 'important');
+                // Flip border: was right-anchored (border-right:none),
+                // now left-anchored → border-left:none, radii on right side.
+                ib.style.setProperty('border-left', 'none', 'important');
+                ib.style.setProperty('border-right', '1px solid #444', 'important');
+                ib.style.setProperty('border-top-left-radius', '0', 'important');
+                ib.style.setProperty('border-bottom-left-radius', '0', 'important');
+                ib.style.setProperty('border-top-right-radius', '7px', 'important');
+                ib.style.setProperty('border-bottom-right-radius', '7px', 'important');
+            }
 
             // Set up event handlers
             this.setupEventHandlers();
@@ -312,9 +344,14 @@ class CesiumManager {
             }
 
             if (!this.entities.links.has(linkId)) {
-                const linkColor = this.getLinkColor(properties.bandwidth_utilization || 0);
+                var cw = this._colorForMode(this.metricsMode, properties);
+                var linkColor = cw.color;
+                var linkWidth = this._widthForNorm(cw.norm);
 
                 const link = this.viewer.entities.add({
+                    id: `link-${linkId}`,
+                    name: `Link ${source} ↔ ${target}`,
+                    description: this._buildLinkDescription(properties, this.metricsMode),
                     polyline: {
                         positions: new Cesium.CallbackProperty(() => {
                             const srcPos = sourceEntity.position
@@ -326,7 +363,7 @@ class CesiumManager {
                             if (!srcPos || !tgtPos) return [];
                             return [srcPos, tgtPos];
                         }, false),
-                        width: 1,
+                        width: linkWidth,
                         material: new Cesium.PolylineDashMaterialProperty({
                             color: linkColor,
                         }),
@@ -339,6 +376,8 @@ class CesiumManager {
                         target: target,
                         bandwidth_utilization: properties.bandwidth_utilization || 0,
                         latency: properties.latency || 0,
+                        loss_base: properties.loss_base != null ? properties.loss_base : 0,
+                        loss_jitter: properties.loss_jitter != null ? properties.loss_jitter : 0,
                         loss_rate: properties.loss_rate || 0,
                         is_active: properties.is_active !== false,
                         color: linkColor,
@@ -349,17 +388,25 @@ class CesiumManager {
                 this.stats.links++;
             } else {
                 const link = this.entities.links.get(linkId);
-                const newColor = this.getLinkColor(properties.bandwidth_utilization || 0);
 
-                link.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                    color: newColor,
-                });
-
+                // Store new property values first
                 link.properties.bandwidth_utilization = properties.bandwidth_utilization || 0;
                 link.properties.latency = properties.latency || 0;
+                link.properties.loss_base = properties.loss_base != null ? properties.loss_base : 0;
+                link.properties.loss_jitter = properties.loss_jitter != null ? properties.loss_jitter : 0;
                 link.properties.loss_rate = properties.loss_rate || 0;
                 link.properties.is_active = properties.is_active !== false;
-                link.properties.color = newColor;
+
+                // Color + width by current metric mode
+                var cw = this._colorForMode(this.metricsMode, link.properties);
+                link.properties.color = cw.color;
+                link.polyline.material = new Cesium.PolylineDashMaterialProperty({
+                    color: cw.color,
+                });
+                link.polyline.width = this._widthForNorm(cw.norm);
+
+                // Keep the InfoBox description up-to-date
+                link.description = this._buildLinkDescription(properties, this.metricsMode);
             }
 
             return this.entities.links.get(linkId);
@@ -371,24 +418,120 @@ class CesiumManager {
     }
 
     /**
-     * Determine link color based on bandwidth utilization
-     * Smooth gradient: green (0) -> yellow (0.5) -> red (1.0)
+     * Build HTML description for the Cesium InfoBox when a link is clicked.
      */
-    getLinkColor(utilization) {
-        const u = Math.max(0, Math.min(1, utilization));
-        let r, g, b;
-        if (u < 0.5) {
-            // Green to Yellow
-            r = u * 2 * 255;
-            g = 255;
-            b = 0;
-        } else {
-            // Yellow to Red
-            r = 255;
-            g = (1 - (u - 0.5) * 2) * 255;
-            b = 0;
+    _buildLinkDescription(props, mode) {
+        var modeKey = mode || this.metricsMode || 'none';
+        var bw = ((props.bandwidth_utilization || 0) * 100).toFixed(0);
+        var lat = (props.latency || 0).toFixed(1);
+        var base = ((props.loss_base != null ? props.loss_base : 0) * 100).toFixed(2);
+        var jitter = ((props.loss_jitter != null ? props.loss_jitter : 0) * 100).toFixed(2);
+        var total = ((props.loss_rate || 0) * 100).toFixed(2);
+        var active = props.is_active !== false;
+
+        var td = 'style="padding:3px 12px 3px 0;color:#aaa;"';
+        var tv = 'style="padding:3px 0;font-weight:600;"';
+
+        var html = '<table style="font-size:13px;border-collapse:collapse;">';
+
+        switch (modeKey) {
+            case 'bandwidth':
+                html += '<tr><td ' + td + '>Bandwidth</td><td ' + tv + '>' + bw + '%</td></tr>';
+                break;
+            case 'latency':
+                html += '<tr><td ' + td + '>Latency</td><td ' + tv + '>' + lat + ' ms</td></tr>';
+                break;
+            case 'loss_rate':
+                html += '<tr><td ' + td + '>Packet Loss Rate</td><td ' + tv + '>' + total + '%</td></tr>';
+                html += '<tr><td ' + td + '>&nbsp;&nbsp;Scenario Base</td><td style="padding:3px 0;">' + base + '%</td></tr>';
+                html += '<tr><td ' + td + '>&nbsp;&nbsp;Jitter</td><td style="padding:3px 0;">' + jitter + '%</td></tr>';
+                break;
+            case 'link_status':
+                html += '<tr><td ' + td + '>Status</td><td ' + tv + ' style="color:' + (active ? '#4caf50' : '#f44336') + '">' + (active ? 'Active' : 'Inactive') + '</td></tr>';
+                break;
+            default:
+                html += '<tr><td ' + td + '>Bandwidth</td><td ' + tv + '>' + bw + '%</td></tr>';
+                html += '<tr><td ' + td + '>Latency</td><td ' + tv + '>' + lat + ' ms</td></tr>';
+                html += '<tr><td ' + td + '>Loss Rate</td><td style="padding:3px 0;">' + total + '%</td></tr>';
+                break;
         }
+
+        html += '</table>';
+        return html;
+    }
+
+    // ---- Color-stop tables (normalized 0-1 → hex values) ----
+
+    /** Generic piecewise-linear color interpolator over stops [{t, r, g, b}] */
+    _interpolateColor(u, stops) {
+        var v = Math.max(0, Math.min(1, u));
+        var lo = stops[0], hi = stops[stops.length - 1];
+        for (var i = 0; i < stops.length - 1; i++) {
+            if (v >= stops[i].t && v <= stops[i + 1].t) { lo = stops[i]; hi = stops[i + 1]; break; }
+        }
+        var seg = hi.t - lo.t;
+        var f = seg > 0 ? (v - lo.t) / seg : 0;
+        var r = Math.round(lo.r + (hi.r - lo.r) * f);
+        var g = Math.round(lo.g + (hi.g - lo.g) * f);
+        var b = Math.round(lo.b + (hi.b - lo.b) * f);
         return new Cesium.Color(r / 255, g / 255, b / 255, 1.0);
+    }
+
+    /** Bandwidth utilization → green-yellow-orange-red (5-segment) */
+    getLinkColor(utilization) {
+        return this._interpolateColor(utilization, [
+            { t: 0.0,  r: 0x00, g: 0x64, b: 0x00 },
+            { t: 0.3,  r: 0x00, g: 0xFF, b: 0x00 },
+            { t: 0.5,  r: 0xAD, g: 0xFF, b: 0x2F },
+            { t: 0.7,  r: 0xFF, g: 0xFF, b: 0x00 },
+            { t: 0.85, r: 0xFF, g: 0x8C, b: 0x00 },
+            { t: 1.0,  r: 0x8B, g: 0x00, b: 0x00 },
+        ]);
+    }
+
+    /** End-to-end latency (ms) → cyan-green-yellow-orange-red */
+    getLatencyColor(ms) {
+        return this._interpolateColor(Math.min(1, ms / 100), [
+            { t: 0.0, r: 0x87, g: 0xF5, b: 0xFF },
+            { t: 0.2, r: 0x36, g: 0xE8, b: 0xA8 },
+            { t: 0.4, r: 0xF9, g: 0xF8, b: 0x71 },
+            { t: 0.7, r: 0xFF, g: 0xB3, b: 0x47 },
+            { t: 1.0, r: 0xFF, g: 0x6B, b: 0x35 },
+        ]);
+    }
+
+    /** Packet loss rate (0-1) → blue-cyan-green-orange-red */
+    getLossRateColor(rate) {
+        return this._interpolateColor(Math.min(1, rate * 5), [  // 0.2 (20%) → 1.0
+            { t: 0.0,  r: 0x20, g: 0xA4, b: 0xF3 },
+            { t: 0.05, r: 0x5E, g: 0xD9, b: 0xFF },
+            { t: 0.15, r: 0x64, g: 0xDD, b: 0x78 },
+            { t: 0.35, r: 0xFF, g: 0xC8, b: 0x57 },
+            { t: 0.7,  r: 0xFF, g: 0x57, b: 0x22 },
+            { t: 1.0,  r: 0x9E, g: 0x00, b: 0x00 },
+        ]);
+    }
+
+    /**
+     * Map the current metric to a color + normalized value for width.
+     * Returns {color, norm} where norm is 0–1 for line width scaling.
+     */
+    _colorForMode(mode, props) {
+        var bw = props.bandwidth_utilization || 0;
+        var lat = props.latency || 0;
+        var loss = props.loss_rate || 0;
+        switch (mode) {
+            case 'bandwidth':   return { color: this.getLinkColor(bw),       norm: bw };
+            case 'latency':     return { color: this.getLatencyColor(lat),   norm: Math.min(1, lat / 100) };
+            case 'loss_rate':   return { color: this.getLossRateColor(loss), norm: Math.min(1, loss * 5) };
+            case 'link_status': return { color: this.getLinkColor(props.is_active !== false ? 0 : 1), norm: 0 };
+            default:            return { color: this.getLinkColor(bw),       norm: bw };
+        }
+    }
+
+    /** Line width from normalized value: 1.2px (min) → 5px (max) */
+    _widthForNorm(norm) {
+        return 1.2 + Math.max(0, Math.min(1, norm)) * 3.8;
     }
 
     /**
@@ -417,6 +560,7 @@ class CesiumManager {
      * Clear all entities
      */
     clearAll() {
+        this.selectedEntity = null;
         this.viewer.entities.removeAll();
         this.entities.satellites.clear();
         this.entities.stations.clear();
@@ -427,6 +571,13 @@ class CesiumManager {
     }
 
     /**
+     * Clear all entities for constellation switch (alias for clearAll).
+     */
+    clearAllEntities() {
+        this.clearAll();
+    }
+
+    /**
      * Set metrics display mode
      */
     setMetricsMode(mode) {
@@ -434,30 +585,12 @@ class CesiumManager {
 
         for (const [linkId, link] of this.entities.links.entries()) {
             const props = link.properties;
-            let utilization = 0;
-
-            switch (mode) {
-                case 'bandwidth':
-                    utilization = props.bandwidth_utilization || 0;
-                    break;
-                case 'latency':
-                    utilization = Math.min(1, (props.latency || 0) / 100);
-                    break;
-                case 'loss_rate':
-                    utilization = Math.min(1, (props.loss_rate || 0) * 10);
-                    break;
-                case 'link_status':
-                    utilization = props.is_active ? 0 : 1;
-                    break;
-                default:
-                    utilization = 0;
-                    break;
-            }
-
-            const newColor = this.getLinkColor(utilization);
+            var cw = this._colorForMode(mode, props);
             link.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                color: newColor,
+                color: cw.color,
             });
+            link.polyline.width = this._widthForNorm(cw.norm);
+            link.description = this._buildLinkDescription(props, mode);
         }
     }
 

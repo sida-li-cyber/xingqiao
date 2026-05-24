@@ -14,12 +14,21 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.clients: set[WebSocket] = set()
         self.cores: set[WebSocket] = set()
+        self._last_simulation_init: dict[str, Any] | None = None
         logger.info("ConnectionManager initialized")
 
     async def connect_client(self, websocket: WebSocket) -> None:
         """建立客户端连接"""
         await websocket.accept()
         self.clients.add(websocket)
+        # Replay the last simulation_init so new clients receive
+        # constellation metadata and satellite lists immediately.
+        if self._last_simulation_init is not None:
+            try:
+                await websocket.send_json(self._last_simulation_init)
+                logger.debug("Replayed simulation_init to new client")
+            except Exception as e:
+                logger.error(f"Error replaying simulation_init to new client: {e}")
         logger.info(f"Client connected. Total clients: {len(self.clients)}")
 
     async def connect_core(self, websocket: WebSocket) -> None:
@@ -40,6 +49,10 @@ class ConnectionManager:
 
     async def broadcast_state(self, message: dict[str, Any]) -> None:
         """向所有客户端广播状态更新"""
+        # Store the last simulation_init so new clients receive it on connect.
+        if message.get("message_type") == "simulation_init":
+            self._last_simulation_init = message
+
         if not self.clients:
             logger.debug("No clients connected, skipping broadcast")
             return

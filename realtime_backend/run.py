@@ -77,6 +77,10 @@ Examples:
         port=settings.port,
         log_level=settings.log_level,
         reload=settings.reload,
+        ws="websockets",
+        ws_per_message_deflate=False,
+        ws_ping_interval=10,
+        ws_ping_timeout=5,
     )
 
 

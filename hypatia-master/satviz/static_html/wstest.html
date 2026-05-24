@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>WebSocket Test</title></head>
+<body>
+<h2>WebSocket Test (127.0.0.1:8000)</h2>
+<pre id="log" style="background:#111;color:#0f0;padding:10px;font-family:monospace;height:80vh;overflow-y:scroll;"></pre>
+<script>
+const log = document.getElementById('log');
+function out(msg) { log.textContent += msg + '\n'; log.scrollTop = log.scrollHeight; }
+
+out('Opening WebSocket to ws://127.0.0.1:8000/ws/client...');
+const ws = new WebSocket('ws://127.0.0.1:8000/ws/client');
+
+ws.onopen = () => {
+    out('>>> OPEN - connection established');
+};
+
+ws.onmessage = (e) => {
+    out('<<< MESSAGE received: ' + e.data.substring(0, 80) + '...');
+};
+
+ws.onerror = (e) => {
+    out('!!! ERROR');
+    console.error('WebSocket error:', e);
+};
+
+ws.onclose = (e) => {
+    out('>>> CLOSE - code=' + e.code + ' reason="' + e.reason + '" wasClean=' + e.wasClean);
+    if (e.code === 1006) {
+        out('>>> CODE 1006 = Abnormal Closure (TCP-level disconnect)');
+    }
+};
+</script>
+</body>
+</html>

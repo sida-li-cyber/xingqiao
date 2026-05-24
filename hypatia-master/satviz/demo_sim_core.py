@@ -12,7 +12,8 @@ Usage:
     python demo_sim_core.py
 
     # Options:
-    python demo_sim_core.py --host localhost --port 8000 --num-sats 72 --num-orbits 6
+    python demo_sim_core.py --constellation Starlink --shell 0
+    python demo_sim_core.py --constellation Kuiper --shell 1
 """
 
 import asyncio
@@ -20,7 +21,6 @@ import argparse
 import json
 import math
 import time
-import random
 import sys
 from datetime import datetime, timezone
 
@@ -36,6 +36,31 @@ except ImportError:
 EARTH_RADIUS_KM = 6371.0
 EARTH_MU = 398600.4418  # km^3/s^2
 EARTH_ROTATION_RATE = 360.0 / 86400.0  # deg/s
+
+
+# Simulation scenario profiles: (base_loss_rate, jitter_min, jitter_max, label)
+SCENARIOS = {
+    "ideal":       (0.001, 0.0005, 0.005,  "Ideal Clear Sky"),
+    "commercial":  (0.01,  0.005,  0.04,   "Commercial Service"),
+    "weather":     (0.02,  0.01,   0.06,   "Moderate Weather"),
+    "handover":    (0.03,  0.005,  0.10,   "Frequent Handover"),
+    "extreme":     (0.05,  0.01,   0.15,   "Extreme Conditions"),
+}
+
+
+def deterministic_noise(sim_time: float, link_id: str) -> float:
+    """Deterministic pseudo-random in [-1, 1] based on sim_time + link_id.
+
+    Uses multiple sine harmonics so different links produce different
+    values, but the result is frozen when sim_time stops advancing.
+    """
+    h = hash(link_id) % 10007
+    # Three harmonics with incommensurate frequencies → no visible
+    # repeating pattern within the simulation window (600 s).
+    v = (math.sin(sim_time * 0.713 + h * 0.017) * 0.50 +
+         math.sin(sim_time * 1.301 + h * 0.023) * 0.30 +
+         math.sin(sim_time * 2.117 + h * 0.031) * 0.20)
+    return v  # already in [-1, 1]
 
 
 class Satellite:
@@ -82,22 +107,64 @@ class Satellite:
         return lat_deg, lon_deg, self.altitude_km
 
 
-def create_starlink_constellation(num_orbits=6, sats_per_orbit=12,
-                                  altitude_km=550.0, inclination_deg=53.0):
-    """Create a simplified Starlink-like constellation."""
+# Constellation definitions: (orbits, sats_per_orbit, inclination, altitude_km)
+# Full-scale parameters from FCC/ITU filings.
+_CONSTELLATION_FULL = {
+    "Starlink": [
+        {"orbits": 72, "sats_per_orbit": 22, "inclination": 53.0,  "altitude_km": 550.0},
+        {"orbits": 32, "sats_per_orbit": 50, "inclination": 53.8,  "altitude_km": 1110.0},
+        {"orbits": 8,  "sats_per_orbit": 50, "inclination": 74.0,  "altitude_km": 1130.0},
+        {"orbits": 5,  "sats_per_orbit": 75, "inclination": 81.0,  "altitude_km": 1275.0},
+        {"orbits": 6,  "sats_per_orbit": 75, "inclination": 70.0,  "altitude_km": 1325.0},
+    ],
+    "Kuiper": [
+        {"orbits": 34, "sats_per_orbit": 34, "inclination": 51.9,  "altitude_km": 630.0},
+        {"orbits": 36, "sats_per_orbit": 36, "inclination": 42.0,  "altitude_km": 610.0},
+        {"orbits": 28, "sats_per_orbit": 28, "inclination": 33.0,  "altitude_km": 590.0},
+    ],
+    "Telesat": [
+        {"orbits": 27, "sats_per_orbit": 13, "inclination": 98.98, "altitude_km": 1015.0},
+        {"orbits": 40, "sats_per_orbit": 33, "inclination": 50.88, "altitude_km": 1325.0},
+    ],
+}
+
+
+def scale_shell_params(orbits, sats_per_orbit, target=100.0):
+    """Scale down a shell to ~target total satellites."""
+    total = orbits * sats_per_orbit
+    scale = max(1, int(round(math.sqrt(total / target))))
+    return max(1, orbits // scale), max(1, sats_per_orbit // scale)
+
+
+def create_constellation(name, shell_index, target=100.0):
+    """Create a (scaled-down) constellation shell.
+
+    Args:
+        name: One of "Starlink", "Kuiper", "Telesat".
+        shell_index: 0-based shell index within the constellation.
+        target: Target satellite count per shell after scaling.
+    """
+    shells = _CONSTELLATION_FULL[name]
+    if shell_index < 0 or shell_index >= len(shells):
+        raise ValueError(f"Shell {shell_index} out of range for {name} (0-{len(shells)-1})")
+
+    cfg = shells[shell_index]
+    orig_orbits = cfg["orbits"]
+    orig_sats = cfg["sats_per_orbit"]
+    scaled_orbits, scaled_sats = scale_shell_params(orig_orbits, orig_sats, target)
+
     satellites = []
-    for orb in range(num_orbits):
-        raan = orb * 180.0 / num_orbits
-        for sat in range(sats_per_orbit):
+    for orb in range(scaled_orbits):
+        raan = orb * 180.0 / scaled_orbits
+        for sat in range(scaled_sats):
             sat_id = f"Sat-{orb}-{sat}"
-            mean_anomaly = sat * 360.0 / sats_per_orbit
-            # Phase shift odd-numbered orbits
+            mean_anomaly = sat * 360.0 / scaled_sats
             if orb % 2 == 1:
-                mean_anomaly += 180.0 / sats_per_orbit
+                mean_anomaly += 180.0 / scaled_sats
             satellites.append(Satellite(
                 sat_id=sat_id,
-                altitude_km=altitude_km,
-                inclination_deg=inclination_deg,
+                altitude_km=cfg["altitude_km"],
+                inclination_deg=cfg["inclination"],
                 raan_deg=raan,
                 mean_anomaly_deg=mean_anomaly,
             ))
@@ -183,15 +250,15 @@ def haversine_distance_km(lat1, lon1, lat2, lon2):
 class DemoSimCore:
     """Simulation core that streams state updates to the backend."""
 
-    def __init__(self, host="localhost", port=8000, num_orbits=6,
-                 sats_per_orbit=12):
+    def __init__(self, host="localhost", port=8000,
+                 constellation_name="Starlink", shell_index=0):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
 
-        self.satellites = create_starlink_constellation(
-            num_orbits=num_orbits, sats_per_orbit=sats_per_orbit
-        )
+        self.constellation_name = constellation_name
+        self.current_shell = shell_index
+        self.satellites = create_constellation(constellation_name, shell_index)
         self.ground_stations = create_ground_stations()
         self.links = compute_links(self.satellites, self.ground_stations)
 
@@ -200,6 +267,7 @@ class DemoSimCore:
         self.is_playing = True
         self.speed = 1.0
         self.metrics_mode = "none"
+        self.current_scenario = "commercial"
 
         self.ws = None
         self.running = False
@@ -214,18 +282,30 @@ class DemoSimCore:
                 "lat": lat, "lon": lon, "alt": alt * 1000.0  # km to meters
             }
 
-        # Link status
+        # Link status — driven by current scenario + deterministic jitter
         link_status = {}
+        base_loss, jitter_min, jitter_max, _label = SCENARIOS[self.current_scenario]
         for link_id, link_info in self.links.items():
+            # Deterministic utilization based on sim_time
             utilization = 0.3 + 0.3 * math.sin(self.sim_time * 0.1 + hash(link_id) % 100)
-            utilization += random.uniform(-0.1, 0.1)
             utilization = max(0.0, min(1.0, utilization))
+
+            # Loss rate = scenario base + deterministic jitter scaled to range
+            noise = deterministic_noise(self.sim_time, link_id)
+            jitter_span = jitter_max - jitter_min
+            jitter = jitter_min + (noise * 0.5 + 0.5) * jitter_span
+            loss_rate = round(base_loss + jitter, 4)
+            loss_rate = max(0.0, min(1.0, loss_rate))
 
             link_status[link_id] = {
                 "is_active": True,
+                "source": link_info["source"],
+                "target": link_info["target"],
                 "bandwidth_utilization": round(utilization, 3),
-                "latency": round(10.0 + 40.0 * utilization + random.uniform(-2, 2), 1),
-                "loss_rate": round(max(0, utilization - 0.5) * 0.01, 4),
+                "latency": round(10.0 + 40.0 * utilization, 1),
+                "loss_base": round(base_loss, 4),
+                "loss_jitter": round(jitter, 4),
+                "loss_rate": loss_rate,
             }
 
         # Ground stations
@@ -268,6 +348,14 @@ class DemoSimCore:
                 "satellites": sat_list,
                 "ground_stations": gs_dict,
                 "duration": self.duration,
+                "scenario": self.current_scenario,
+                "constellation": {
+                    "name": self.constellation_name,
+                    "shell_count": len(_CONSTELLATION_FULL[self.constellation_name]),
+                    "current_shell": self.current_shell,
+                },
+                "total_satellites": len(sat_list),
+                "total_links": len(self.links),
             },
         }
 
@@ -304,13 +392,42 @@ class DemoSimCore:
             sats = params.get("satellites", [])
             stas = params.get("stations", [])
             print(f"  Filter: {len(sats)} satellites, {len(stas)} stations")
+        elif action == "scenario":
+            scenario = params.get("scenario", "commercial")
+            if scenario in SCENARIOS:
+                self.current_scenario = scenario
+                _label = SCENARIOS[scenario][3]
+                print(f"  Scenario: {_label}")
+            else:
+                print(f"  Unknown scenario: {scenario}")
+        elif action == "switch_constellation":
+            name = params.get("constellation", self.constellation_name)
+            shell = int(params.get("shell", 0))
+            if name not in _CONSTELLATION_FULL:
+                print(f"  Unknown constellation: {name}")
+                return
+            max_shell = len(_CONSTELLATION_FULL[name]) - 1
+            shell = max(0, min(shell, max_shell))
+            print(f"  Switching to {name} shell {shell}...")
+            self.constellation_name = name
+            self.current_shell = shell
+            self.satellites = create_constellation(name, shell)
+            self.links = compute_links(self.satellites, self.ground_stations)
+            self.sim_time = 0.0
+            # Send new init immediately so frontend rebuilds the scene
+            if self.ws:
+                init_msg = self.get_init_message()
+                await self.ws.send(json.dumps(init_msg))
+            print(f"  Constellation: {len(self.satellites)} satellites, "
+                  f"{len(self.links)} links")
 
     async def run(self):
         """Main simulation loop."""
         print(f"\n{'='*50}")
         print("  Demo Simulation Core")
         print(f"{'='*50}")
-        print(f"  Constellation: {len(self.satellites)} satellites")
+        print(f"  Constellation: {self.constellation_name} shell {self.current_shell}")
+        print(f"  Satellites: {len(self.satellites)}")
         print(f"  Ground Stations: {len(self.ground_stations)}")
         print(f"  Pre-computed Links: {len(self.links)}")
         print(f"  Duration: {self.duration}s")
@@ -352,9 +469,8 @@ class DemoSimCore:
                         if self.is_playing:
                             self.sim_time += update_interval * self.speed
                             if self.sim_time >= self.duration:
-                                self.sim_time = self.duration
-                                self.is_playing = False
-                                print("Simulation reached end")
+                                self.sim_time = 0.0
+                                print("Simulation looped back to 0")
 
                         # Send state update
                         state_msg = self.get_state_update()
@@ -383,17 +499,23 @@ async def main():
     parser = argparse.ArgumentParser(description="Demo Simulation Core")
     parser.add_argument("--host", default="localhost", help="Backend host")
     parser.add_argument("--port", type=int, default=8000, help="Backend port")
-    parser.add_argument("--num-orbits", type=int, default=6,
-                        help="Number of orbital planes")
-    parser.add_argument("--sats-per-orbit", type=int, default=12,
-                        help="Satellites per orbit")
+    parser.add_argument("--constellation", default="Starlink",
+                        choices=["Starlink", "Kuiper", "Telesat"],
+                        help="Constellation name")
+    parser.add_argument("--shell", type=int, default=0,
+                        help="Shell index (0-based)")
     args = parser.parse_args()
+
+    if args.constellation not in _CONSTELLATION_FULL:
+        print(f"Unknown constellation: {args.constellation}")
+        print(f"Available: {list(_CONSTELLATION_FULL.keys())}")
+        sys.exit(1)
 
     core = DemoSimCore(
         host=args.host,
         port=args.port,
-        num_orbits=args.num_orbits,
-        sats_per_orbit=args.sats_per_orbit,
+        constellation_name=args.constellation,
+        shell_index=args.shell,
     )
     await core.run()
 

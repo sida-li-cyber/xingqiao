@@ -42,7 +42,7 @@ class WebSocketManager {
             this.ws.onopen = () => this.handleOpen();
             this.ws.onmessage = (event) => this.handleMessage(event);
             this.ws.onerror = (error) => this.handleError(error);
-            this.ws.onclose = () => this.handleClose();
+            this.ws.onclose = (event) => this.handleClose(event);
 
         } catch (error) {
             console.error('[WebSocket] Connection failed:', error);
@@ -55,7 +55,8 @@ class WebSocketManager {
      * Handle connection opened
      */
     handleOpen() {
-        console.log('[WebSocket] Connected to server');
+        this._openTime = Date.now();
+        console.log('[WebSocket] Connected to server at', new Date().toISOString());
         this.isConnected = true;
         this.reconnectAttempts = 0;
         this.callbacks.onConnect();
@@ -118,8 +119,13 @@ class WebSocketManager {
     /**
      * Handle connection closed
      */
-    handleClose() {
-        console.log('[WebSocket] Disconnected from server');
+    handleClose(event) {
+        const aliveMs = this._openTime ? (Date.now() - this._openTime) : -1;
+        const aliveSec = aliveMs >= 0 ? (aliveMs / 1000).toFixed(1) + 's' : 'unknown';
+        console.log(`[WebSocket] Disconnected — code=${event.code} reason="${event.reason}" wasClean=${event.wasClean} alive=${aliveSec}`);
+        if (event.code === 1006) {
+            console.warn('[WebSocket] CODE 1006 = Abnormal closure (TCP-level disconnect). Alive: ' + aliveSec);
+        }
         this.isConnected = false;
         this.callbacks.onDisconnect();
         this.scheduleReconnect();
@@ -203,6 +209,17 @@ class WebSocketManager {
         this.sendCommand('filter', {
             satellites: satellites,
             stations: stations,
+        });
+    }
+
+    sendScenarioCommand(scenario) {
+        this.sendCommand('scenario', { scenario: scenario });
+    }
+
+    sendConstellationCommand(constellationName, shellIndex) {
+        this.sendCommand('switch_constellation', {
+            constellation: constellationName,
+            shell: shellIndex,
         });
     }
 

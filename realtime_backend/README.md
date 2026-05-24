@@ -432,6 +432,8 @@ realtime_backend/
 ├── run.bat              # Windows 启动脚本
 ├── config.yaml          # 配置文件
 ├── requirements.txt     # 依赖列表
+├── demo.py              # 测试/演示客户端（前端与核心模拟）
+├── QUICKSTART.md        # 中文快速入门指南
 └── README.md            # 本文档
 ```
 
@@ -511,16 +513,19 @@ python -m realtime_backend.run --reload --log-level debug
 
 ## 部署
 
-### Docker 部署（示例）
+### Docker 部署
+
+项目暂未包含预置 Dockerfile，可参考以下示例自行构建：
+
 ```dockerfile
 FROM python:3.10-slim
 
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY realtime_backend/ ./realtime_backend/
+COPY . .
 
 EXPOSE 8000
 

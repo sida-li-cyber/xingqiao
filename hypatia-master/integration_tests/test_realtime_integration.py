@@ -422,8 +422,8 @@ async def main():
     except Exception as e:
         print(f"\nERROR: Cannot connect to backend at {BACKEND_URI}")
         print("Please start the backend first:")
-        print("  cd /home/li/dayilixiang")
-        print("  PYTHONPATH=/home/li/dayilixiang:/home/li/dayilixiang/realtime_backend python -m realtime_backend.run --port 8000")
+        print("  cd /path/to/hypatia-master")
+        print("  PYTHONPATH=/path/to/hypatia-master:/path/to/realtime_backend python -m realtime_backend.run --port 8000")
         print(f"\nDetails: {e}")
         sys.exit(1)
 

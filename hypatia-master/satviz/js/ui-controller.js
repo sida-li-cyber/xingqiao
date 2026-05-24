@@ -13,6 +13,34 @@ class UIController {
         this.selectedMetrics = 'none';
         this.selectedSatellites = new Set();
         this.selectedStations = new Set();
+
+        this.scenarioInfo = {
+            ideal:       'Avg loss: 0.1% | Jitter: 0.05%–0.5%',
+            commercial:  'Avg loss: 1.0% | Jitter: 0.5%–4.0%',
+            weather:     'Avg loss: 2.0% | Jitter: 1.0%–6.0%',
+            handover:    'Avg loss: 3.0% | Jitter: 0.5%–10.0%',
+            extreme:     'Avg loss: 5.0% | Jitter: 1.0%–15.0%',
+        };
+
+        // Shell metadata for building dropdown options (full-scale params)
+        this._shellMeta = {
+            Starlink: [
+                { label: 'Shell 0 - 550km / 53.0°',  orbits: 72, sats: 22, inc: 53.0,  alt: 550 },
+                { label: 'Shell 1 - 1110km / 53.8°', orbits: 32, sats: 50, inc: 53.8,  alt: 1110 },
+                { label: 'Shell 2 - 1130km / 74.0°', orbits: 8,  sats: 50, inc: 74.0,  alt: 1130 },
+                { label: 'Shell 3 - 1275km / 81.0°', orbits: 5,  sats: 75, inc: 81.0,  alt: 1275 },
+                { label: 'Shell 4 - 1325km / 70.0°', orbits: 6,  sats: 75, inc: 70.0,  alt: 1325 },
+            ],
+            Kuiper: [
+                { label: 'Shell 0 - 630km / 51.9°',  orbits: 34, sats: 34, inc: 51.9,  alt: 630 },
+                { label: 'Shell 1 - 610km / 42.0°',  orbits: 36, sats: 36, inc: 42.0,  alt: 610 },
+                { label: 'Shell 2 - 590km / 33.0°',  orbits: 28, sats: 28, inc: 33.0,  alt: 590 },
+            ],
+            Telesat: [
+                { label: 'Shell 0 - 1015km / 98.98°', orbits: 27, sats: 13, inc: 98.98, alt: 1015 },
+                { label: 'Shell 1 - 1325km / 50.88°', orbits: 40, sats: 33, inc: 50.88, alt: 1325 },
+            ],
+        };
     }
 
     /**
@@ -39,6 +67,13 @@ class UIController {
 
         // Metrics selection
         document.getElementById('metricsSelect').addEventListener('change', (e) => this.selectMetrics(e.target.value));
+
+        // Scenario selection
+        document.getElementById('scenarioSelect').addEventListener('change', (e) => this.selectScenario(e.target.value));
+
+        // Constellation / shell selection
+        document.getElementById('constellationSelect').addEventListener('change', (e) => this.onConstellationChange(e.target.value));
+        document.getElementById('shellSelect').addEventListener('change', (e) => this.onShellChange(parseInt(e.target.value)));
 
         // Satellite filter
         document.getElementById('satelliteSearch').addEventListener('input', (e) => this.searchSatellites(e.target.value));
@@ -185,6 +220,169 @@ class UIController {
         this.selectedMetrics = metricsType;
         this.ws.sendMetricsCommand(metricsType);
         this.cesium.setMetricsMode(metricsType);
+        this.updateMetricsLegend(metricsType);
+    }
+
+    /**
+     * Show/hide and update the color legend bar based on selected metric.
+     */
+    updateMetricsLegend(metricsType) {
+        const legend = document.getElementById('metricsLegend');
+        const title = document.getElementById('legendTitle');
+        const ticks = document.getElementById('legendTicks');
+        const bar = document.getElementById('legendBar');
+
+        const legends = {
+            bandwidth: {
+                title: 'Bandwidth Utilization',
+                gradient: 'linear-gradient(to right, #006400 0%, #00FF00 30%, #ADFF2F 50%, #FFFF00 70%, #FF8C00 85%, #8B0000 100%)',
+                stops: [
+                    { pos: '0%',  label: '0%' },
+                    { pos: '30%', label: '30%' },
+                    { pos: '50%', label: '50%' },
+                    { pos: '70%', label: '70%' },
+                    { pos: '85%', label: '85%' },
+                    { pos: '100%',label: '100%' },
+                ],
+            },
+            latency: {
+                title: 'Latency (ms)',
+                gradient: 'linear-gradient(to right, #87F5FF 0%, #36E8A8 20%, #F9F871 40%, #FFB347 70%, #FF6B35 100%)',
+                stops: [
+                    { pos: '0%',  label: '0' },
+                    { pos: '20%', label: '20' },
+                    { pos: '40%', label: '40' },
+                    { pos: '70%', label: '70' },
+                    { pos: '100%',label: '100+' },
+                ],
+            },
+            loss_rate: {
+                title: 'Packet Loss Rate',
+                gradient: 'linear-gradient(to right, #20A4F3 0%, #5ED9FF 10%, #64DD78 30%, #FFC857 55%, #FF5722 80%, #9E0000 100%)',
+                stops: [
+                    { pos: '0%',  label: '0%' },
+                    { pos: '10%', label: '0.5%' },
+                    { pos: '30%', label: '2%' },
+                    { pos: '55%', label: '6%' },
+                    { pos: '80%', label: '15%' },
+                    { pos: '100%',label: '>15%' },
+                ],
+            },
+            link_status: {
+                title: 'Link Status',
+                gradient: 'linear-gradient(to right, #4caf50, #f44336)',
+                stops: [
+                    { pos: '0%',  label: 'Active' },
+                    { pos: '100%',label: 'Inactive' },
+                ],
+            },
+        };
+
+        const cfg = legends[metricsType];
+        if (cfg) {
+            title.textContent = cfg.title;
+            bar.style.background = cfg.gradient;
+
+            ticks.innerHTML = '';
+            cfg.stops.forEach(function(s) {
+                var el = document.createElement('span');
+                el.className = 'legend-tick';
+                el.style.left = s.pos;
+                el.textContent = s.label;
+                ticks.appendChild(el);
+            });
+
+            legend.style.display = 'block';
+        } else {
+            legend.style.display = 'none';
+        }
+    }
+
+    /**
+     * Select simulation scenario
+     */
+    selectScenario(scenario) {
+        this.ws.sendScenarioCommand(scenario);
+        const info = this.scenarioInfo[scenario] || '';
+        document.getElementById('scenarioInfo').textContent = info;
+        console.log('[UIController] Scenario:', scenario);
+    }
+
+    /**
+     * Constellation dropdown changed — update shell dropdown options.
+     */
+    onConstellationChange(constellationName) {
+        this.updateShellDropdown(constellationName);
+        // Auto-switch to shell 0 of the new constellation
+        this.switchConstellation(constellationName, 0);
+    }
+
+    /**
+     * Shell dropdown changed — trigger constellation switch.
+     */
+    onShellChange(shellIndex) {
+        var name = document.getElementById('constellationSelect').value;
+        this.switchConstellation(name, shellIndex);
+    }
+
+    /**
+     * Update shell dropdown options for the given constellation.
+     */
+    updateShellDropdown(constellationName) {
+        var shellSelect = document.getElementById('shellSelect');
+        var shells = this._shellMeta[constellationName] || [];
+        shellSelect.innerHTML = '';
+        shells.forEach(function (s, i) {
+            var opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = s.label;
+            shellSelect.appendChild(opt);
+        });
+        shellSelect.value = '0';
+    }
+
+    /**
+     * Switch to a different constellation shell.
+     */
+    switchConstellation(constellationName, shellIndex) {
+        console.log('[UIController] Switching to', constellationName, 'shell', shellIndex);
+        // Block state updates from the old constellation until the new
+        // simulation_init arrives and triggers the real clear+rebuild.
+        this.app._constellationSwitching = true;
+        // Clear filter selections — new satellites will have different IDs
+        this.clearFilterSelections();
+        // Send command to backend
+        this.ws.sendConstellationCommand(constellationName, shellIndex);
+        // Safety timeout: reset the guard if the backend never responds,
+        // otherwise stale state_updates would be blocked forever.
+        clearTimeout(this._switchTimeout);
+        var self = this;
+        this._switchTimeout = setTimeout(function () {
+            if (self.app._constellationSwitching) {
+                console.warn('[UIController] Constellation switch timed out — resetting guard');
+                self.app._constellationSwitching = false;
+            }
+        }, 5000);
+    }
+
+    /**
+     * Update constellation info display (called from app on simulation_init).
+     */
+    updateConstellationInfo(name, currentShell, shellCount, totalSats, totalLinks) {
+        var shells = this._shellMeta[name] || [];
+        var shellLabel = shells[currentShell] ? shells[currentShell].label : ('Shell ' + currentShell);
+        var el = document.getElementById('constellationInfo');
+        if (el) {
+            el.textContent = name + ' | ' + shellLabel + ' | ' + totalSats + ' sats, ' + totalLinks + ' links';
+        }
+    }
+
+    /**
+     * Clear all filter selections (used on constellation switch).
+     */
+    clearFilterSelections() {
+        this.selectedSatellites.clear();
+        this.selectedStations.clear();
     }
 
     /**

@@ -32,13 +32,17 @@ It consists of five main components:
 * `satviz` : Cesium visualization pipeline to generate interactive satellite network
   visualizations. It makes use of the online Cesium API by generating CesiumJS code.
   The API calls require its user to obtain a Cesium access token (via [https://cesium.com/]()).
-  **Enhanced with real-time interactive mode** featuring WebSocket connectivity, 
-  playback controls, and dynamic 3D scene updates. More information can be found in `satviz/README.md`.
+  **Enhanced with real-time interactive mode** featuring WebSocket connectivity,
+  playback controls, and dynamic 3D scene updates. The frontend is a modular vanilla JS
+  application (`static_html/js/`) with a detailed frontend integration guide in
+  `satviz/FRONTEND_README.md`. Also includes `wstest.html` for WebSocket testing and
+  `test_constellation.py` for constellation validation. More information can be found in `satviz/README.md`.
   (license: MIT)
 
-* `realtime_backend` : **New** FastAPI + WebSocket relay server that bridges the simulation core 
+* `realtime_backend` : **New** FastAPI + WebSocket relay server that bridges the simulation core
   and frontend visualization clients. Supports real-time state broadcasting, command forwarding,
-  and multi-client connections. See `../realtime_backend/README.md` for details.
+  and multi-client connections. Located alongside `hypatia-master/` as a sibling directory.
+  See `../realtime_backend/README.md` for details.
   (license: MIT)
 
 * `paper` : Experimental and plotting code to reproduce the experiments and 

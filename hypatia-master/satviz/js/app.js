@@ -14,6 +14,9 @@ class SatelliteVisualizationApp {
         this.satelliteList = [];
         this.stationList = [];
         this.currentRoute = null;
+        this._currentConstellationName = null;
+        this._currentShell = null;
+        this._constellationSwitching = false;
     }
 
     /**
@@ -30,7 +33,13 @@ class SatelliteVisualizationApp {
 
             // Initialize WebSocket Manager
             this.ws = new WebSocketManager({
-                host: window.location.hostname || 'localhost',
+                // Normalize localhost / file:// → 127.0.0.1 to force IPv4;
+                // the backend binds 0.0.0.0 (IPv4-only), and browsers
+                // resolve "localhost" to ::1 (IPv6) first, which won't
+                // reach uvicorn.
+                host: (!window.location.hostname || window.location.hostname === 'localhost')
+                    ? '127.0.0.1'
+                    : window.location.hostname,
                 port: 8000,
                 path: '/ws/client',
                 onConnect: () => this.handleWSConnect(),
@@ -49,8 +58,25 @@ class SatelliteVisualizationApp {
             // Load saved Cesium token
             this.ui.loadCesiumToken();
 
-            // Connect to WebSocket
-            this.ws.connect();
+            // Connect to WebSocket only after Cesium has finished its
+            // first frame — guarantees the WebGL context, render loop,
+            // and all async subsystems are fully initialized before
+            // opening a persistent connection.
+            this.cesium.scene.postRender.addEventListener(() => {
+                if (!this._wsConnected) {
+                    this._wsConnected = true;
+                    this._wsConnectTime = Date.now();
+                    console.log('[App] Cesium first frame rendered, opening WebSocket at', new Date().toISOString());
+                    this.ws.connect();
+
+                    // Log every 5s to confirm WS is still alive
+                    this._wsHeartbeatTimer = setInterval(() => {
+                        const aliveSec = ((Date.now() - this._wsConnectTime) / 1000).toFixed(0);
+                        const wsState = this.ws.ws ? this.ws.ws.readyState : 'no-socket';
+                        console.log('[App] WS alive for ' + aliveSec + 's, readyState=' + wsState);
+                    }, 5000);
+                }
+            });
 
             // Start statistics update loop
             this.startStatisticsLoop();
@@ -68,6 +94,38 @@ class SatelliteVisualizationApp {
      */
     handleSimulationInit(payload) {
         console.log('[App] Simulation initialized:', payload);
+
+        // Detect constellation switch
+        var constChanged = false;
+        if (payload.constellation) {
+            constChanged =
+                this._currentConstellationName !== payload.constellation.name ||
+                this._currentShell !== payload.constellation.current_shell;
+            this._currentConstellationName = payload.constellation.name;
+            this._currentShell = payload.constellation.current_shell;
+
+            // Update dropdowns to match actual constellation
+            document.getElementById('constellationSelect').value = payload.constellation.name;
+            this.ui.updateShellDropdown(payload.constellation.name);
+            document.getElementById('shellSelect').value = String(payload.constellation.current_shell);
+
+            // Update constellation info display
+            this.ui.updateConstellationInfo(
+                payload.constellation.name,
+                payload.constellation.current_shell,
+                payload.constellation.shell_count,
+                payload.total_satellites || (payload.satellites ? payload.satellites.length : 0),
+                payload.total_links || 0
+            );
+        }
+
+        // If constellation changed, clear entities before rebuilding
+        if (constChanged) {
+            console.log('[App] Constellation changed, clearing old entities');
+            this.cesium.clearAllEntities();
+            this.currentRoute = null;
+            this._constellationSwitching = false;
+        }
 
         if (payload.duration) {
             this.simulationDuration = payload.duration;
@@ -109,6 +167,10 @@ class SatelliteVisualizationApp {
      * Handle incoming state updates from backend
      */
     handleStateUpdate(payload) {
+        // Skip state updates during constellation switch — stale data
+        // from the old constellation would recreate cleared entities.
+        if (this._constellationSwitching) return;
+
         try {
             // Update satellite positions
             if (payload.satellite_positions) {
@@ -221,17 +283,14 @@ class SatelliteVisualizationApp {
      */
     updateLinkStatus(linkStatus) {
         for (const [linkId, status] of Object.entries(linkStatus)) {
-            const parts = linkId.split('-');
-            if (parts.length === 2) {
-                const [source, target] = parts;
-
-                this.cesium.addOrUpdateLink(linkId, source, target, {
-                    bandwidth_utilization: status.bandwidth_utilization || 0,
-                    latency: status.latency || 0,
-                    loss_rate: status.loss_rate || 0,
-                    is_active: status.is_active !== false,
-                });
-            }
+            this.cesium.addOrUpdateLink(linkId, status.source, status.target, {
+                bandwidth_utilization: status.bandwidth_utilization || 0,
+                latency: status.latency || 0,
+                loss_base: status.loss_base != null ? status.loss_base : 0,
+                loss_jitter: status.loss_jitter != null ? status.loss_jitter : 0,
+                loss_rate: status.loss_rate || 0,
+                is_active: status.is_active !== false,
+            });
         }
     }
 
