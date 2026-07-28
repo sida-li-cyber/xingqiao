@@ -4,4 +4,4 @@ PyYAML>=6.0
 pydantic>=2.0
 pydantic-settings>=2.0
 python-multipart>=0.0.6
-websockets>=10.0
+pydantic-settings>=2.0

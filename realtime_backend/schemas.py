@@ -1,26 +1,16 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
-class StatePayload(BaseModel):
-    satellite_positions: dict[str, Any] = Field(..., description="Satellite position data")
-    link_status: dict[str, Any] = Field(..., description="Link status data")
-    routing: dict[str, Any] = Field(..., description="Routing information")
-    bandwidth_utilization: dict[str, Any] = Field(..., description="Bandwidth utilization metrics")
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class StateUpdate(BaseModel):
-    message_type: Literal["state_update"] = "state_update"
-    payload: StatePayload
+# 注意：StatePayload / StateUpdate 模型已移除。
+# 后端现在是透明转发层，不再校验 core 发来的状态消息内容。
+# 协议格式定义见 docs/protocol-v2-multidomain.md
 
 
 class CommandPayload(BaseModel):
-    action: str = Field(..., description="控制命令，例如 pause / resume / speed / metrics")
+    action: str = Field(..., description="控制命令，例如 play / pause / speed / metrics / filter / focus")
     params: dict[str, Any] | None = Field(default=None, description="可选参数")
 
 

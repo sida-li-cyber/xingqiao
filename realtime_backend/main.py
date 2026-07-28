@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from .config import load_settings
 from .core import manager
-from .schemas import CommandMessage, StateUpdate
+from .schemas import CommandMessage
 
 # 配置日志
 logging.basicConfig(
@@ -131,7 +131,7 @@ async def client_endpoint(websocket: WebSocket) -> None:
                             "action": command.payload.action,
                             "params": command.payload.params,
                             "status": "forwarded",
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                            "timestamp": datetime.utcnow().isoformat(),
                         },
                     },
                 )
@@ -179,32 +179,16 @@ async def core_endpoint(websocket: WebSocket) -> None:
         while True:
             try:
                 message_data = await websocket.receive_json()
-                message_type = message_data.get("message_type")
+                message_type = message_data.get("message_type", "unknown")
                 logger.debug(f"Core {core_id} sent message type: {message_type}")
 
-                # Messages to broadcast directly to all clients
-                broadcast_types = {settings.state_message_type, "simulation_init"}
-
-                if message_type in broadcast_types:
-                    logger.debug(
-                        f"Broadcasting {message_type} to {len(manager.clients)} clients"
-                    )
-                    await manager.broadcast_state(message_data)
-                else:
-                    logger.debug(f"Core {core_id} sent non-broadcast message: {message_type}")
-                    await manager.send_personal_message(
-                        websocket,
-                        {
-                            "message_type": "ack",
-                            "payload": {
-                                "status": "received",
-                                "detail": "Core message accepted.",
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            },
-                        },
-                    )
+                # 透明转发：将 core 发来的所有消息广播给全部客户端
+                await manager.broadcast_state(message_data)
+                logger.debug(
+                    f"Relayed '{message_type}' to {len(manager.clients)} clients"
+                )
             except ValueError as e:
-                logger.error(f"Core {core_id} sent invalid data: {e}")
+                logger.error(f"Core {core_id} sent invalid JSON: {e}")
 
     except WebSocketDisconnect:
         logger.info(

@@ -2,50 +2,23 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
-dist/
-build/
-*.egg
-.eggs/
+.venv/
+venv/
 
-# ns-3 (huge, cloned by build.sh)
-**/ns-3.47/
-**/ns-3.*.zip
+# Node
+node_modules/
 
-# Backups and duplicates
-**/backup_original/
-hypatia-master/hypatia-master/
-
-# IDE and editor
+# IDE
 .idea/
 .vscode/
 *.swp
-*.swo
-*~
 
 # OS
-.DS_Store
 Thumbs.db
+.DS_Store
 
-# Conda
-.miniconda3/
-.miniconda/
+# Temp Office files
+~$*
 
-# Output and temporary
-viz_output/
-test_results/
-coverage_report/
-*.log
-temp_*/
-
-# Unrelated projects
-andrej-karpathy-skills-main/
-andrej-karpathy-skills-main.zip
-video_processor/
-Starlink.html
-
-# Startup scripts for Windows
-start_realtime_backend.bat
-start_realtime_backend.ps1
-
-# Claude memory
-.claude/
+# Simulation output
+hypatia-master/satviz/viz_output/

@@ -1,8 +1,9 @@
 """
-Demo Simulation Core for testing the realtime visualization frontend.
+Demo Simulation Core v2 — 多域节点（卫星 + 无人机 + 船舶 + 地面站）
 
-Simulates a simplified Starlink-like LEO constellation and streams
-state updates to the realtime_backend via WebSocket.
+Simulates a Starlink-like LEO constellation, UAV formations over the
+South China Sea, and ships along major maritime routes. Streams state
+updates to the realtime_backend via WebSocket using protocol v2.
 
 Usage:
     # Start the realtime backend first:
@@ -12,8 +13,8 @@ Usage:
     python demo_sim_core.py
 
     # Options:
-    python demo_sim_core.py --constellation Starlink --shell 0
-    python demo_sim_core.py --constellation Kuiper --shell 1
+    python demo_sim_core.py --host localhost --port 8000
+    python demo_sim_core.py --num-uavs 8 --num-ships 10
 """
 
 import asyncio
@@ -21,8 +22,8 @@ import argparse
 import json
 import math
 import time
+import random
 import sys
-from datetime import datetime, timezone
 
 try:
     import websockets
@@ -32,335 +33,616 @@ except ImportError:
     sys.exit(1)
 
 
-# Earth constants
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
 EARTH_RADIUS_KM = 6371.0
 EARTH_MU = 398600.4418  # km^3/s^2
 EARTH_ROTATION_RATE = 360.0 / 86400.0  # deg/s
 
-
-# Simulation scenario profiles: (base_loss_rate, jitter_min, jitter_max, label)
-SCENARIOS = {
-    "ideal":       (0.001, 0.0005, 0.005,  "Ideal Clear Sky"),
-    "commercial":  (0.01,  0.005,  0.04,   "Commercial Service"),
-    "weather":     (0.02,  0.01,   0.06,   "Moderate Weather"),
-    "handover":    (0.03,  0.005,  0.10,   "Frequent Handover"),
-    "extreme":     (0.05,  0.01,   0.15,   "Extreme Conditions"),
-}
+# Link range thresholds (km) with hysteresis
+GSL_CONNECT_RANGE = 2000.0
+GSL_DISCONNECT_RANGE = 2200.0
+SUL_CONNECT_RANGE = 1500.0
+SUL_DISCONNECT_RANGE = 1700.0
+SSL_CONNECT_RANGE = 1800.0
+SSL_DISCONNECT_RANGE = 2000.0
 
 
-def deterministic_noise(sim_time: float, link_id: str) -> float:
-    """Deterministic pseudo-random in [-1, 1] based on sim_time + link_id.
+# ---------------------------------------------------------------------------
+# Utility
+# ---------------------------------------------------------------------------
 
-    Uses multiple sine harmonics so different links produce different
-    values, but the result is frozen when sim_time stops advancing.
-    """
-    h = hash(link_id) % 10007
-    # Three harmonics with incommensurate frequencies → no visible
-    # repeating pattern within the simulation window (600 s).
-    v = (math.sin(sim_time * 0.713 + h * 0.017) * 0.50 +
-         math.sin(sim_time * 1.301 + h * 0.023) * 0.30 +
-         math.sin(sim_time * 2.117 + h * 0.031) * 0.20)
-    return v  # already in [-1, 1]
-
-
-class Satellite:
-    """A simplified satellite with circular orbit propagation."""
-
-    def __init__(self, sat_id, altitude_km, inclination_deg, raan_deg,
-                 mean_anomaly_deg, epoch=0.0):
-        self.sat_id = sat_id
-        self.altitude_km = altitude_km
-        self.inclination_rad = math.radians(inclination_deg)
-        self.raan_rad = math.radians(raan_deg)
-        self.mean_anomaly_rad = math.radians(mean_anomaly_deg)
-
-        # Orbital period (seconds)
-        r = EARTH_RADIUS_KM + altitude_km
-        self.period = 2.0 * math.pi * math.sqrt(r ** 3 / EARTH_MU)
-        self.angular_velocity = 2.0 * math.pi / self.period
-
-    def get_position(self, time_seconds):
-        """Return (lat_deg, lon_deg, alt_km) at the given time."""
-        # Mean anomaly at time t
-        M = self.mean_anomaly_rad + self.angular_velocity * time_seconds
-
-        # Approximate true anomaly = mean anomaly (circular orbit)
-        theta = M % (2.0 * math.pi)
-
-        # Latitude from spherical trigonometry
-        lat_rad = math.asin(math.sin(self.inclination_rad) * math.sin(theta))
-        lat_deg = math.degrees(lat_rad)
-
-        # Longitude
-        lon_offset_rad = math.atan2(
-            math.cos(self.inclination_rad) * math.sin(theta),
-            math.cos(theta)
-        )
-        lon_deg = math.degrees(self.raan_rad + lon_offset_rad)
-
-        # Account for Earth's rotation
-        lon_deg -= EARTH_ROTATION_RATE * time_seconds
-
-        # Normalize to [-180, 180]
-        lon_deg = ((lon_deg + 180.0) % 360.0) - 180.0
-
-        return lat_deg, lon_deg, self.altitude_km
-
-
-# Constellation definitions: (orbits, sats_per_orbit, inclination, altitude_km)
-# Full-scale parameters from FCC/ITU filings.
-_CONSTELLATION_FULL = {
-    "Starlink": [
-        {"orbits": 72, "sats_per_orbit": 22, "inclination": 53.0,  "altitude_km": 550.0},
-        {"orbits": 32, "sats_per_orbit": 50, "inclination": 53.8,  "altitude_km": 1110.0},
-        {"orbits": 8,  "sats_per_orbit": 50, "inclination": 74.0,  "altitude_km": 1130.0},
-        {"orbits": 5,  "sats_per_orbit": 75, "inclination": 81.0,  "altitude_km": 1275.0},
-        {"orbits": 6,  "sats_per_orbit": 75, "inclination": 70.0,  "altitude_km": 1325.0},
-    ],
-    "Kuiper": [
-        {"orbits": 34, "sats_per_orbit": 34, "inclination": 51.9,  "altitude_km": 630.0},
-        {"orbits": 36, "sats_per_orbit": 36, "inclination": 42.0,  "altitude_km": 610.0},
-        {"orbits": 28, "sats_per_orbit": 28, "inclination": 33.0,  "altitude_km": 590.0},
-    ],
-    "Telesat": [
-        {"orbits": 27, "sats_per_orbit": 13, "inclination": 98.98, "altitude_km": 1015.0},
-        {"orbits": 40, "sats_per_orbit": 33, "inclination": 50.88, "altitude_km": 1325.0},
-    ],
-}
-
-
-def scale_shell_params(orbits, sats_per_orbit, target=100.0):
-    """Scale down a shell to ~target total satellites."""
-    total = orbits * sats_per_orbit
-    scale = max(1, int(round(math.sqrt(total / target))))
-    return max(1, orbits // scale), max(1, sats_per_orbit // scale)
-
-
-def create_constellation(name, shell_index, target=100.0):
-    """Create a (scaled-down) constellation shell.
-
-    Args:
-        name: One of "Starlink", "Kuiper", "Telesat".
-        shell_index: 0-based shell index within the constellation.
-        target: Target satellite count per shell after scaling.
-    """
-    shells = _CONSTELLATION_FULL[name]
-    if shell_index < 0 or shell_index >= len(shells):
-        raise ValueError(f"Shell {shell_index} out of range for {name} (0-{len(shells)-1})")
-
-    cfg = shells[shell_index]
-    orig_orbits = cfg["orbits"]
-    orig_sats = cfg["sats_per_orbit"]
-    scaled_orbits, scaled_sats = scale_shell_params(orig_orbits, orig_sats, target)
-
-    satellites = []
-    for orb in range(scaled_orbits):
-        raan = orb * 180.0 / scaled_orbits
-        for sat in range(scaled_sats):
-            sat_id = f"Sat-{orb}-{sat}"
-            mean_anomaly = sat * 360.0 / scaled_sats
-            if orb % 2 == 1:
-                mean_anomaly += 180.0 / scaled_sats
-            satellites.append(Satellite(
-                sat_id=sat_id,
-                altitude_km=cfg["altitude_km"],
-                inclination_deg=cfg["inclination"],
-                raan_deg=raan,
-                mean_anomaly_deg=mean_anomaly,
-            ))
-    return satellites
-
-
-def create_ground_stations():
-    """Create a set of major cities as ground stations."""
-    return {
-        "Beijing": (39.9042, 116.4074),
-        "Shanghai": (31.2304, 121.4737),
-        "Tokyo": (35.6762, 139.6503),
-        "Singapore": (1.3521, 103.8198),
-        "London": (51.5074, -0.1278),
-        "Paris": (48.8566, 2.3522),
-        "New York": (40.7128, -74.0060),
-        "Los Angeles": (34.0522, -118.2437),
-        "Sydney": (-33.8688, 151.2093),
-        "Moscow": (55.7558, 37.6173),
-        "Delhi": (28.6139, 77.2090),
-        "Dubai": (25.2048, 55.2708),
-        "Sao Paulo": (-23.5505, -46.6333),
-        "Cairo": (30.0444, 31.2357),
-        "Cape Town": (-33.9249, 18.4241),
-    }
-
-
-def compute_links(satellites, ground_stations, max_gsl_range_km=2000.0,
-                  max_isl_range_km=5000.0):
-    """
-    Compute ISLs (inter-satellite links) and GSLs (ground-satellite links)
-    based on current positions.
-    """
-    links = {}
-    # ISLs: connect satellites within the same orbit (orbit links)
-    # Group by orbit
-    orbits = {}
-    for sat in satellites:
-        parts = sat.sat_id.split('-')
-        orb_id = parts[1]
-        if orb_id not in orbits:
-            orbits[orb_id] = []
-        orbits[orb_id].append(sat)
-
-    for orb_id, sats in orbits.items():
-        sats_sorted = sorted(sats, key=lambda s: int(s.sat_id.split('-')[2]))
-        n = len(sats_sorted)
-        for i in range(n):
-            s1 = sats_sorted[i]
-            s2 = sats_sorted[(i + 1) % n]
-            link_id = f"{s1.sat_id}-{s2.sat_id}"
-            links[link_id] = {"type": "isl", "source": s1.sat_id, "target": s2.sat_id}
-
-    # Cross-orbit links: connect to neighboring orbit's nearest satellite
-    # Simplified: connect same-index satellites in adjacent orbits
-    for oi in range(len(orbits)):
-        orb_a = str(oi)
-        orb_b = str((oi + 1) % len(orbits))
-        if orb_a in orbits and orb_b in orbits:
-            sats_a = sorted(orbits[orb_a], key=lambda s: int(s.sat_id.split('-')[2]))
-            sats_b = sorted(orbits[orb_b], key=lambda s: int(s.sat_id.split('-')[2]))
-            for i in range(min(len(sats_a), len(sats_b))):
-                link_id = f"{sats_a[i].sat_id}-{sats_b[i].sat_id}"
-                if link_id not in links:
-                    links[link_id] = {"type": "isl", "source": sats_a[i].sat_id,
-                                      "target": sats_b[i].sat_id}
-
-    return links
-
-
-def haversine_distance_km(lat1, lon1, lat2, lon2):
-    """Compute distance between two lat/lon points in km."""
-    R = EARTH_RADIUS_KM
+def haversine_km(lat1, lon1, lat2, lon2):
+    """Great-circle distance between two points in km."""
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = (math.sin(dlat / 2) ** 2 +
          math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
          math.sin(dlon / 2) ** 2)
-    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-    return R * c
+    return EARTH_RADIUS_KM * 2.0 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
+
+def normalize_lon(lon):
+    """Normalize longitude to [-180, 180]."""
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
+# ---------------------------------------------------------------------------
+# Satellite
+# ---------------------------------------------------------------------------
+
+class Satellite:
+    """Circular orbit propagation (unchanged from v1)."""
+
+    def __init__(self, sat_id, altitude_km, inclination_deg, raan_deg,
+                 mean_anomaly_deg):
+        self.id = sat_id
+        self.altitude_km = altitude_km
+        self.inclination_rad = math.radians(inclination_deg)
+        self.raan_rad = math.radians(raan_deg)
+        self.mean_anomaly_rad = math.radians(mean_anomaly_deg)
+
+        r = EARTH_RADIUS_KM + altitude_km
+        self.period = 2.0 * math.pi * math.sqrt(r ** 3 / EARTH_MU)
+        self.angular_velocity = 2.0 * math.pi / self.period
+
+    def get_position(self, t):
+        """Return (lat_deg, lon_deg, alt_m) at simulation time t."""
+        M = self.mean_anomaly_rad + self.angular_velocity * t
+        theta = M % (2.0 * math.pi)
+
+        lat_rad = math.asin(math.sin(self.inclination_rad) * math.sin(theta))
+        lat = math.degrees(lat_rad)
+
+        lon_offset = math.atan2(
+            math.cos(self.inclination_rad) * math.sin(theta),
+            math.cos(theta)
+        )
+        lon = math.degrees(self.raan_rad + lon_offset)
+        lon -= EARTH_ROTATION_RATE * t
+        lon = normalize_lon(lon)
+
+        return lat, lon, self.altitude_km * 1000.0  # meters
+
+
+def create_constellation(num_orbits=6, sats_per_orbit=12,
+                         altitude_km=550.0, inclination_deg=53.0):
+    satellites = []
+    for orb in range(num_orbits):
+        raan = orb * 180.0 / num_orbits
+        for idx in range(sats_per_orbit):
+            sat_id = f"Sat-{orb}-{idx}"
+            ma = idx * 360.0 / sats_per_orbit
+            if orb % 2 == 1:
+                ma += 180.0 / sats_per_orbit
+            satellites.append(Satellite(
+                sat_id, altitude_km, inclination_deg, raan, ma
+            ))
+    return satellites
+
+
+# ---------------------------------------------------------------------------
+# UAV
+# ---------------------------------------------------------------------------
+
+class UAV:
+    """
+    Parametric flight path (circular or figure-8) over a fixed region.
+    Not physically precise — just needs to look plausible.
+    """
+
+    def __init__(self, uav_id, center_lat, center_lon, radius_km,
+                 base_alt_m, period_s, phase_offset, pattern="circle",
+                 speed_kmh=300.0, group="alpha"):
+        self.id = uav_id
+        self.center_lat = center_lat
+        self.center_lon = center_lon
+        self.radius_km = radius_km
+        self.base_alt_m = base_alt_m
+        self.period_s = period_s
+        self.phase_offset = phase_offset
+        self.pattern = pattern
+        self.speed_kmh = speed_kmh
+        self.group = group
+
+    def get_position(self, t):
+        """Return (lat_deg, lon_deg, alt_m, heading_deg)."""
+        angle = 2.0 * math.pi * t / self.period_s + self.phase_offset
+
+        if self.pattern == "figure8":
+            # Lemniscate-like parametric curve
+            x = self.radius_km * math.sin(angle)
+            y = self.radius_km * math.sin(angle) * math.cos(angle)
+            # Heading: derivative direction
+            dx = self.radius_km * math.cos(angle)
+            dy = self.radius_km * (math.cos(2 * angle))
+            heading = math.degrees(math.atan2(dx, dy))
+        else:
+            # Circular orbit
+            x = self.radius_km * math.cos(angle)
+            y = self.radius_km * math.sin(angle)
+            heading = math.degrees(angle) + 90.0
+
+        # Convert local km offsets to lat/lon (small-angle approx)
+        lat = self.center_lat + y / 111.0
+        lon = self.center_lon + x / (111.0 * math.cos(math.radians(self.center_lat)))
+        lon = normalize_lon(lon)
+
+        # Gentle altitude oscillation
+        alt = self.base_alt_m + 500.0 * math.sin(angle * 2)
+        heading = heading % 360.0
+
+        return lat, lon, alt, heading
+
+
+def create_uav_formation(num_uavs=8):
+    """Create a UAV formation over the South China Sea."""
+    center_lat, center_lon = 18.0, 116.0
+    uavs = []
+    for i in range(num_uavs):
+        phase = i * 2.0 * math.pi / num_uavs
+        # Alternate between two concentric rings and patterns
+        if i < num_uavs // 2:
+            radius = 40.0
+            pattern = "circle"
+            alt = 8000.0
+            group = "alpha"
+        else:
+            radius = 70.0
+            pattern = "figure8"
+            alt = 12000.0
+            group = "bravo"
+
+        uavs.append(UAV(
+            uav_id=f"UAV-{i+1:02d}",
+            center_lat=center_lat,
+            center_lon=center_lon,
+            radius_km=radius,
+            base_alt_m=alt,
+            period_s=90.0 + i * 10.0,  # slightly different periods
+            phase_offset=phase,
+            pattern=pattern,
+            speed_kmh=250.0 + i * 20.0,
+            group=group,
+        ))
+    return uavs
+
+
+# ---------------------------------------------------------------------------
+# Ship
+# ---------------------------------------------------------------------------
+
+SHIP_ROUTES = [
+    {
+        "name": "Shanghai-Singapore",
+        "waypoints": [(31.23, 121.47), (22.30, 114.17), (10.00, 110.00), (1.35, 103.82)],
+        "speed_knots": 18,
+    },
+    {
+        "name": "Shenzhen-Colombo",
+        "waypoints": [(22.54, 114.06), (15.00, 112.00), (6.93, 79.85)],
+        "speed_knots": 20,
+    },
+    {
+        "name": "Tokyo-Sydney",
+        "waypoints": [(35.68, 139.65), (25.00, 140.00), (10.00, 145.00), (-10.00, 150.00), (-33.87, 151.21)],
+        "speed_knots": 22,
+    },
+    {
+        "name": "Singapore-Rotterdam",
+        "waypoints": [(1.35, 103.82), (6.00, 80.00), (12.50, 45.00), (30.00, 32.50), (37.00, 15.00), (51.90, 4.50)],
+        "speed_knots": 21,
+    },
+    {
+        "name": "Shanghai-Busan",
+        "waypoints": [(31.23, 121.47), (33.00, 124.00), (35.10, 129.04)],
+        "speed_knots": 16,
+    },
+]
+
+
+class Ship:
+    """Moves along a predefined waypoint route at constant speed."""
+
+    def __init__(self, ship_id, route_name, waypoints, speed_knots):
+        self.id = ship_id
+        self.route_name = route_name
+        self.waypoints = waypoints
+        self.speed_kmh = speed_knots * 1.852
+
+        # Pre-compute segment lengths (km)
+        self.segment_lengths = []
+        self.total_length = 0.0
+        for i in range(len(waypoints) - 1):
+            d = haversine_km(waypoints[i][0], waypoints[i][1],
+                             waypoints[i+1][0], waypoints[i+1][1])
+            self.segment_lengths.append(d)
+            self.total_length += d
+
+    def get_position(self, t):
+        """Return (lat_deg, lon_deg, alt_m, heading_deg)."""
+        dist = (self.speed_kmh * t / 3600.0) % self.total_length
+
+        # Find which segment we're on
+        accumulated = 0.0
+        for i, seg_len in enumerate(self.segment_lengths):
+            if accumulated + seg_len >= dist:
+                # Interpolate within this segment
+                frac = (dist - accumulated) / seg_len if seg_len > 0 else 0
+                lat = self.waypoints[i][0] + frac * (self.waypoints[i+1][0] - self.waypoints[i][0])
+                lon = self.waypoints[i][1] + frac * (self.waypoints[i+1][1] - self.waypoints[i][1])
+                # Heading from segment direction
+                dlat = self.waypoints[i+1][0] - self.waypoints[i][0]
+                dlon = self.waypoints[i+1][1] - self.waypoints[i][1]
+                heading = math.degrees(math.atan2(dlon, dlat)) % 360.0
+                return lat, normalize_lon(lon), 0.0, heading
+            accumulated += seg_len
+
+        # Fallback: last waypoint
+        return self.waypoints[-1][0], self.waypoints[-1][1], 0.0, 0.0
+
+
+def create_ships(num_ships=10):
+    """Distribute ships across available routes."""
+    ships = []
+    for i in range(num_ships):
+        route = SHIP_ROUTES[i % len(SHIP_ROUTES)]
+        # Offset start time so ships aren't all at the same position
+        ships.append(Ship(
+            ship_id=f"Ship-{i+1:02d}",
+            route_name=route["name"],
+            waypoints=route["waypoints"],
+            speed_knots=route["speed_knots"] + random.uniform(-2, 2),
+        ))
+        # Give each ship a time offset by shifting its internal clock
+        ships[-1]._time_offset = i * 3600.0  # 1 hour apart
+    return ships
+
+
+# ---------------------------------------------------------------------------
+# Ground Stations
+# ---------------------------------------------------------------------------
+
+GROUND_STATIONS = {
+    "Beijing":     (39.9042, 116.4074, "北京"),
+    "Shanghai":    (31.2304, 121.4737, "上海"),
+    "Tokyo":       (35.6762, 139.6503, "东京"),
+    "Singapore":   (1.3521, 103.8198, "新加坡"),
+    "London":      (51.5074, -0.1278, "伦敦"),
+    "Paris":       (48.8566, 2.3522, "巴黎"),
+    "New York":    (40.7128, -74.0060, "纽约"),
+    "Los Angeles": (34.0522, -118.2437, "洛杉矶"),
+    "Sydney":      (-33.8688, 151.2093, "悉尼"),
+    "Moscow":      (55.7558, 37.6173, "莫斯科"),
+    "Delhi":       (28.6139, 77.2090, "德里"),
+    "Dubai":       (25.2048, 55.2708, "迪拜"),
+    "Sao Paulo":   (-23.5505, -46.6333, "圣保罗"),
+    "Cairo":       (30.0444, 31.2357, "开罗"),
+    "Cape Town":   (-33.9249, 18.4241, "开普敦"),
+}
+
+
+# ---------------------------------------------------------------------------
+# Simulation Core
+# ---------------------------------------------------------------------------
 
 class DemoSimCore:
-    """Simulation core that streams state updates to the backend."""
+    """Multi-domain simulation core streaming v2 protocol."""
 
-    def __init__(self, host="localhost", port=8000,
-                 constellation_name="Starlink", shell_index=0):
+    def __init__(self, host="localhost", port=8000, num_orbits=6,
+                 sats_per_orbit=12, num_uavs=8, num_ships=10):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
 
-        self.constellation_name = constellation_name
-        self.current_shell = shell_index
-        self.satellites = create_constellation(constellation_name, shell_index)
-        self.ground_stations = create_ground_stations()
-        self.links = compute_links(self.satellites, self.ground_stations)
+        # Create entities
+        self.satellites = create_constellation(num_orbits, sats_per_orbit)
+        self.uavs = create_uav_formation(num_uavs)
+        self.ships = create_ships(num_ships)
+        self.ground_stations = GROUND_STATIONS
 
+        # Pre-compute static ISL topology
+        self.isl_links = self._compute_isl_topology()
+
+        # Dynamic link state (with hysteresis)
+        self._active_gsl = set()
+        self._active_sul = set()
+        self._active_ssl = set()
+
+        # Simulation state
         self.sim_time = 0.0
-        self.duration = 600.0  # 10 minutes of simulation
+        self.duration = 600.0
         self.is_playing = True
         self.speed = 1.0
-        self.metrics_mode = "none"
-        self.current_scenario = "commercial"
+        self.metrics_mode = "bandwidth"
 
         self.ws = None
         self.running = False
 
-    def get_state_update(self):
-        """Build a complete state_update message."""
-        # Satellite positions
-        sat_positions = {}
+    # ------------------------------------------------------------------
+    # ISL topology (static)
+    # ------------------------------------------------------------------
+
+    def _compute_isl_topology(self):
+        """Pre-compute intra-orbit and cross-orbit ISL pairs."""
+        links = []
+        orbits = {}
         for sat in self.satellites:
-            lat, lon, alt = sat.get_position(self.sim_time)
-            sat_positions[sat.sat_id] = {
-                "lat": lat, "lon": lon, "alt": alt * 1000.0  # km to meters
+            parts = sat.id.split('-')
+            orb_id = int(parts[1])
+            orbits.setdefault(orb_id, []).append(sat)
+
+        # Intra-orbit (ring)
+        for orb_id, sats in orbits.items():
+            sats_sorted = sorted(sats, key=lambda s: int(s.id.split('-')[2]))
+            n = len(sats_sorted)
+            for i in range(n):
+                links.append((sats_sorted[i].id, sats_sorted[(i+1) % n].id))
+
+        # Cross-orbit (same index in adjacent planes)
+        num_orb = len(orbits)
+        for oi in range(num_orb):
+            sats_a = sorted(orbits[oi], key=lambda s: int(s.id.split('-')[2]))
+            sats_b = sorted(orbits[(oi+1) % num_orb], key=lambda s: int(s.id.split('-')[2]))
+            for i in range(min(len(sats_a), len(sats_b))):
+                links.append((sats_a[i].id, sats_b[i].id))
+
+        return links
+
+    # ------------------------------------------------------------------
+    # Dynamic link computation
+    # ------------------------------------------------------------------
+
+    def _update_dynamic_links(self, positions):
+        """Compute GSL/SUL/SSL with hysteresis."""
+        sat_pos = {sid: p for sid, p in positions.items() if sid.startswith("Sat-")}
+        gs_pos = {name: (data[0], data[1]) for name, data in self.ground_stations.items()}
+        uav_pos = {uid: p for uid, p in positions.items() if uid.startswith("UAV-")}
+        ship_pos = {sid: p for sid, p in positions.items() if sid.startswith("Ship-")}
+
+        # GSL: ground station <-> satellite
+        new_gsl = set()
+        for gs_name, (gs_lat, gs_lon) in gs_pos.items():
+            for sat_id, sp in sat_pos.items():
+                d = haversine_km(gs_lat, gs_lon, sp["lat"], sp["lon"])
+                pair = (gs_name, sat_id)
+                if pair in self._active_gsl:
+                    if d < GSL_DISCONNECT_RANGE:
+                        new_gsl.add(pair)
+                else:
+                    if d < GSL_CONNECT_RANGE:
+                        new_gsl.add(pair)
+        self._active_gsl = new_gsl
+
+        # SUL: satellite <-> UAV
+        new_sul = set()
+        for uav_id, up in uav_pos.items():
+            for sat_id, sp in sat_pos.items():
+                d = haversine_km(up["lat"], up["lon"], sp["lat"], sp["lon"])
+                pair = (sat_id, uav_id)
+                if pair in self._active_sul:
+                    if d < SUL_DISCONNECT_RANGE:
+                        new_sul.add(pair)
+                else:
+                    if d < SUL_CONNECT_RANGE:
+                        new_sul.add(pair)
+        self._active_sul = new_sul
+
+        # SSL: satellite <-> Ship
+        new_ssl = set()
+        for ship_id, shp in ship_pos.items():
+            for sat_id, sp in sat_pos.items():
+                d = haversine_km(shp["lat"], shp["lon"], sp["lat"], sp["lon"])
+                pair = (sat_id, ship_id)
+                if pair in self._active_ssl:
+                    if d < SSL_DISCONNECT_RANGE:
+                        new_ssl.add(pair)
+                else:
+                    if d < SSL_CONNECT_RANGE:
+                        new_ssl.add(pair)
+        self._active_ssl = new_ssl
+
+    # ------------------------------------------------------------------
+    # Message builders
+    # ------------------------------------------------------------------
+
+    def get_init_message(self):
+        """Build v2 simulation_init."""
+        nodes = {}
+
+        # Satellites
+        for sat in self.satellites:
+            parts = sat.id.split('-')
+            nodes[sat.id] = {
+                "type": "satellite",
+                "label": sat.id,
+                "orbit": {
+                    "altitude_km": sat.altitude_km,
+                    "inclination_deg": math.degrees(sat.inclination_rad),
+                    "plane": int(parts[1]),
+                    "index": int(parts[2]),
+                },
             }
 
-        # Link status — driven by current scenario + deterministic jitter
-        link_status = {}
-        base_loss, jitter_min, jitter_max, _label = SCENARIOS[self.current_scenario]
-        for link_id, link_info in self.links.items():
-            # Deterministic utilization based on sim_time
-            utilization = 0.3 + 0.3 * math.sin(self.sim_time * 0.1 + hash(link_id) % 100)
-            utilization = max(0.0, min(1.0, utilization))
+        # UAVs
+        for uav in self.uavs:
+            nodes[uav.id] = {
+                "type": "uav",
+                "label": f"无人机-{uav.id.split('-')[1]}",
+                "group": uav.group,
+                "base_alt_m": uav.base_alt_m,
+                "speed_kmh": uav.speed_kmh,
+            }
 
-            # Loss rate = scenario base + deterministic jitter scaled to range
-            noise = deterministic_noise(self.sim_time, link_id)
-            jitter_span = jitter_max - jitter_min
-            jitter = jitter_min + (noise * 0.5 + 0.5) * jitter_span
-            loss_rate = round(base_loss + jitter, 4)
-            loss_rate = max(0.0, min(1.0, loss_rate))
-
-            link_status[link_id] = {
-                "is_active": True,
-                "source": link_info["source"],
-                "target": link_info["target"],
-                "bandwidth_utilization": round(utilization, 3),
-                "latency": round(10.0 + 40.0 * utilization, 1),
-                "loss_base": round(base_loss, 4),
-                "loss_jitter": round(jitter, 4),
-                "loss_rate": loss_rate,
+        # Ships
+        for ship in self.ships:
+            nodes[ship.id] = {
+                "type": "ship",
+                "label": f"货轮-{ship.id.split('-')[1]}",
+                "route_name": ship.route_name,
+                "speed_knots": round(ship.speed_kmh / 1.852, 1),
             }
 
         # Ground stations
-        gs_data = {}
-        for name, (lat, lon) in self.ground_stations.items():
-            gs_data[name] = {"lat": lat, "lon": lon, "alt": 0.0, "name": name}
-
-        # Routing (highlight a random path every 30 seconds)
-        routing = {}
-        route_interval = int(self.sim_time / 30)
-        if route_interval % 2 == 0 and len(self.satellites) >= 4:
-            sat_ids = [s.sat_id for s in self.satellites[:4]]
-            routing["highlight_path"] = sat_ids
-
-        return {
-            "message_type": "state_update",
-            "payload": {
-                "satellite_positions": sat_positions,
-                "ground_stations": gs_data,
-                "link_status": link_status,
-                "routing": routing,
-                "bandwidth_utilization": {
-                    lid: ls["bandwidth_utilization"]
-                    for lid, ls in link_status.items()
-                },
-                "timestamp": self.sim_time,
-            },
-        }
-
-    def get_init_message(self):
-        """Build the simulation_init message."""
-        sat_list = [s.sat_id for s in self.satellites]
-        gs_dict = {}
-        for name, (lat, lon) in self.ground_stations.items():
-            gs_dict[name] = {"lat": lat, "lon": lon, "alt": 0.0, "name": name}
+        for name, (lat, lon, label) in self.ground_stations.items():
+            nodes[name] = {
+                "type": "ground_station",
+                "label": label,
+                "lat": lat,
+                "lon": lon,
+            }
 
         return {
             "message_type": "simulation_init",
             "payload": {
-                "satellites": sat_list,
-                "ground_stations": gs_dict,
+                "version": "2.0",
                 "duration": self.duration,
-                "scenario": self.current_scenario,
-                "constellation": {
-                    "name": self.constellation_name,
-                    "shell_count": len(_CONSTELLATION_FULL[self.constellation_name]),
-                    "current_shell": self.current_shell,
+                "update_rate_hz": 10,
+                "nodes": nodes,
+                "link_types": {
+                    "isl": {"label": "星间链路", "color": "#4FC3F7"},
+                    "gsl": {"label": "地面-卫星链路", "color": "#FF8A65"},
+                    "sul": {"label": "卫星-无人机链路", "color": "#81C784"},
+                    "ssl": {"label": "卫星-船舶链路", "color": "#FFB74D"},
                 },
-                "total_satellites": len(sat_list),
-                "total_links": len(self.links),
             },
         }
 
+    def get_state_update(self):
+        """Build v2 state_update with all domains."""
+        positions = {}
+
+        # Satellite positions
+        for sat in self.satellites:
+            lat, lon, alt = sat.get_position(self.sim_time)
+            positions[sat.id] = {"lat": lat, "lon": lon, "alt": alt}
+
+        # UAV positions
+        for uav in self.uavs:
+            lat, lon, alt, heading = uav.get_position(self.sim_time)
+            positions[uav.id] = {"lat": lat, "lon": lon, "alt": alt, "heading": heading}
+
+        # Ship positions (with time offset)
+        for ship in self.ships:
+            t_ship = self.sim_time + getattr(ship, '_time_offset', 0.0)
+            lat, lon, alt, heading = ship.get_position(t_ship)
+            positions[ship.id] = {"lat": lat, "lon": lon, "alt": alt, "heading": heading}
+
+        # Update dynamic links
+        self._update_dynamic_links(positions)
+
+        # Build links dict
+        links = {}
+
+        # ISL (always active)
+        for src, tgt in self.isl_links:
+            link_id = f"{src}--{tgt}"
+            util = 0.3 + 0.3 * math.sin(self.sim_time * 0.1 + hash(link_id) % 100)
+            util += random.uniform(-0.05, 0.05)
+            util = max(0.0, min(1.0, util))
+            links[link_id] = {
+                "type": "isl",
+                "source": src,
+                "target": tgt,
+                "is_active": True,
+                "bandwidth_utilization": round(util, 3),
+                "latency_ms": round(8.0 + 20.0 * util, 1),
+                "loss_rate": 0.0,
+            }
+
+        # GSL
+        for gs_name, sat_id in self._active_gsl:
+            link_id = f"{gs_name}--{sat_id}"
+            util = 0.2 + 0.4 * math.sin(self.sim_time * 0.15 + hash(link_id) % 50)
+            util = max(0.0, min(1.0, util + random.uniform(-0.05, 0.05)))
+            links[link_id] = {
+                "type": "gsl",
+                "source": gs_name,
+                "target": sat_id,
+                "is_active": True,
+                "bandwidth_utilization": round(util, 3),
+                "latency_ms": round(5.0 + 10.0 * util, 1),
+                "loss_rate": round(max(0, util - 0.6) * 0.005, 4),
+            }
+
+        # SUL
+        for sat_id, uav_id in self._active_sul:
+            link_id = f"{sat_id}--{uav_id}"
+            util = 0.15 + 0.35 * math.sin(self.sim_time * 0.2 + hash(link_id) % 30)
+            util = max(0.0, min(1.0, util + random.uniform(-0.05, 0.05)))
+            links[link_id] = {
+                "type": "sul",
+                "source": sat_id,
+                "target": uav_id,
+                "is_active": True,
+                "bandwidth_utilization": round(util, 3),
+                "latency_ms": round(6.0 + 12.0 * util, 1),
+                "loss_rate": 0.0,
+            }
+
+        # SSL
+        for sat_id, ship_id in self._active_ssl:
+            link_id = f"{sat_id}--{ship_id}"
+            util = 0.2 + 0.3 * math.sin(self.sim_time * 0.12 + hash(link_id) % 40)
+            util = max(0.0, min(1.0, util + random.uniform(-0.05, 0.05)))
+            links[link_id] = {
+                "type": "ssl",
+                "source": sat_id,
+                "target": ship_id,
+                "is_active": True,
+                "bandwidth_utilization": round(util, 3),
+                "latency_ms": round(10.0 + 15.0 * util, 1),
+                "loss_rate": round(max(0, util - 0.7) * 0.008, 4),
+            }
+
+        # Routing highlight (cycle through interesting cross-domain paths)
+        routing = {}
+        route_phase = int(self.sim_time / 20) % 4
+        if route_phase == 0 and self.satellites:
+            # Satellite-only path
+            routing["highlight_path"] = [s.id for s in self.satellites[:5]]
+        elif route_phase == 1 and self._active_gsl and self.satellites:
+            # Ground -> Satellite path
+            gs_pair = next(iter(self._active_gsl))
+            routing["highlight_path"] = [gs_pair[0], gs_pair[1],
+                                         self.satellites[1].id, self.satellites[2].id]
+        elif route_phase == 2 and self._active_sul:
+            # Satellite -> UAV path
+            sul_pair = next(iter(self._active_sul))
+            routing["highlight_path"] = [sul_pair[0], sul_pair[1]]
+        elif route_phase == 3 and self._active_ssl:
+            # Satellite -> Ship path
+            ssl_pair = next(iter(self._active_ssl))
+            routing["highlight_path"] = [ssl_pair[0], ssl_pair[1]]
+
+        # Metrics summary
+        active_count = sum(1 for lk in links.values() if lk["is_active"])
+        utils = [lk["bandwidth_utilization"] for lk in links.values() if lk["is_active"]]
+        latencies = [lk["latency_ms"] for lk in links.values() if lk["is_active"]]
+
+        return {
+            "message_type": "state_update",
+            "payload": {
+                "timestamp": round(self.sim_time, 2),
+                "positions": positions,
+                "links": links,
+                "routing": routing,
+                "metrics_summary": {
+                    "active_links": active_count,
+                    "total_nodes": len(positions) + len(self.ground_stations),
+                    "avg_utilization": round(sum(utils) / len(utils), 3) if utils else 0,
+                    "max_latency_ms": round(max(latencies), 1) if latencies else 0,
+                },
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Command handling
+    # ------------------------------------------------------------------
+
     async def handle_command(self, data):
-        """Process incoming commands from the backend."""
         payload = data.get("payload", {})
         action = payload.get("action", "")
         params = payload.get("params") or {}
@@ -379,59 +661,47 @@ class DemoSimCore:
             self.sim_time = 0.0
             print("  ↻ Reset, time reset to 0")
         elif action == "speed":
-            self.speed = float(params.get("multiplier", 1.0))
+            self.speed = max(0.1, min(10.0, float(params.get("multiplier", 1.0))))
             print(f"  Speed set to {self.speed}x")
         elif action == "timeline":
             target = float(params.get("timestamp", 0))
             self.sim_time = max(0, min(self.duration, target))
             print(f"  ⏩ Jumped to t={self.sim_time:.1f}s")
         elif action == "metrics":
-            self.metrics_mode = params.get("type", "none")
+            self.metrics_mode = params.get("type", "bandwidth")
             print(f"  Metrics mode: {self.metrics_mode}")
         elif action == "filter":
-            sats = params.get("satellites", [])
-            stas = params.get("stations", [])
-            print(f"  Filter: {len(sats)} satellites, {len(stas)} stations")
-        elif action == "scenario":
-            scenario = params.get("scenario", "commercial")
-            if scenario in SCENARIOS:
-                self.current_scenario = scenario
-                _label = SCENARIOS[scenario][3]
-                print(f"  Scenario: {_label}")
-            else:
-                print(f"  Unknown scenario: {scenario}")
-        elif action == "switch_constellation":
-            name = params.get("constellation", self.constellation_name)
-            shell = int(params.get("shell", 0))
-            if name not in _CONSTELLATION_FULL:
-                print(f"  Unknown constellation: {name}")
-                return
-            max_shell = len(_CONSTELLATION_FULL[name]) - 1
-            shell = max(0, min(shell, max_shell))
-            print(f"  Switching to {name} shell {shell}...")
-            self.constellation_name = name
-            self.current_shell = shell
-            self.satellites = create_constellation(name, shell)
-            self.links = compute_links(self.satellites, self.ground_stations)
-            self.sim_time = 0.0
-            # Send new init immediately so frontend rebuilds the scene
-            if self.ws:
-                init_msg = self.get_init_message()
-                await self.ws.send(json.dumps(init_msg))
-            print(f"  Constellation: {len(self.satellites)} satellites, "
-                  f"{len(self.links)} links")
+            types = params.get("types", [])
+            nodes = params.get("nodes", [])
+            print(f"  Filter: types={types}, nodes={len(nodes)}")
+        elif action == "focus":
+            node_id = params.get("node_id", "")
+            print(f"  Focus: {node_id}")
+        elif action == "view_preset":
+            preset = params.get("preset", "global")
+            print(f"  View preset: {preset}")
+
+    # ------------------------------------------------------------------
+    # Main loop
+    # ------------------------------------------------------------------
 
     async def run(self):
-        """Main simulation loop."""
-        print(f"\n{'='*50}")
-        print("  Demo Simulation Core")
-        print(f"{'='*50}")
-        print(f"  Constellation: {self.constellation_name} shell {self.current_shell}")
-        print(f"  Satellites: {len(self.satellites)}")
-        print(f"  Ground Stations: {len(self.ground_stations)}")
-        print(f"  Pre-computed Links: {len(self.links)}")
-        print(f"  Duration: {self.duration}s")
-        print(f"{'='*50}\n")
+        num_sats = len(self.satellites)
+        num_uavs = len(self.uavs)
+        num_ships = len(self.ships)
+        num_gs = len(self.ground_stations)
+
+        print(f"\n{'='*55}")
+        print("  Demo Simulation Core v2 — Multi-Domain")
+        print(f"{'='*55}")
+        print(f"  Satellites:      {num_sats}")
+        print(f"  UAVs:            {num_uavs}")
+        print(f"  Ships:           {num_ships}")
+        print(f"  Ground Stations: {num_gs}")
+        print(f"  ISL links:       {len(self.isl_links)}")
+        print(f"  Duration:        {self.duration}s")
+        print(f"  Protocol:        v2.0")
+        print(f"{'='*55}\n")
 
         retry_count = 0
         while retry_count < 30:
@@ -441,19 +711,18 @@ class DemoSimCore:
                     self.ws = ws
                     print("Connected to backend!")
 
-                    # Send initialization message
+                    # Send init
                     init_msg = self.get_init_message()
                     await ws.send(json.dumps(init_msg))
-                    print("Sent simulation_init")
+                    print("Sent simulation_init (v2)")
 
                     self.running = True
-                    last_time = time.time()
-                    update_interval = 0.1  # 10 Hz updates
+                    update_interval = 0.1  # 10 Hz
 
                     while self.running:
                         loop_start = time.time()
 
-                        # Receive and process commands (non-blocking)
+                        # Receive commands (non-blocking)
                         try:
                             msg = await asyncio.wait_for(ws.recv(), timeout=0.02)
                             data = json.loads(msg)
@@ -465,22 +734,23 @@ class DemoSimCore:
                             self.running = False
                             break
 
-                        # Advance simulation time
+                        # Advance time
                         if self.is_playing:
                             self.sim_time += update_interval * self.speed
                             if self.sim_time >= self.duration:
-                                self.sim_time = 0.0
-                                print("Simulation looped back to 0")
+                                self.sim_time = self.duration
+                                self.is_playing = False
+                                print("Simulation reached end")
 
-                        # Send state update
+                        # Send state
                         state_msg = self.get_state_update()
                         await ws.send(json.dumps(state_msg))
 
-                        # Sleep to maintain update rate
+                        # Maintain rate
                         elapsed = time.time() - loop_start
                         await asyncio.sleep(max(0, update_interval - elapsed))
 
-                    break  # Exit retry loop on clean exit
+                    break
 
             except (ConnectionRefusedError, OSError) as e:
                 retry_count += 1
@@ -495,27 +765,32 @@ class DemoSimCore:
                 self.running = False
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 async def main():
-    parser = argparse.ArgumentParser(description="Demo Simulation Core")
+    parser = argparse.ArgumentParser(
+        description="Demo Simulation Core v2 (Multi-Domain)")
     parser.add_argument("--host", default="localhost", help="Backend host")
     parser.add_argument("--port", type=int, default=8000, help="Backend port")
-    parser.add_argument("--constellation", default="Starlink",
-                        choices=["Starlink", "Kuiper", "Telesat"],
-                        help="Constellation name")
-    parser.add_argument("--shell", type=int, default=0,
-                        help="Shell index (0-based)")
+    parser.add_argument("--num-orbits", type=int, default=6,
+                        help="Number of orbital planes")
+    parser.add_argument("--sats-per-orbit", type=int, default=12,
+                        help="Satellites per orbit")
+    parser.add_argument("--num-uavs", type=int, default=8,
+                        help="Number of UAVs")
+    parser.add_argument("--num-ships", type=int, default=10,
+                        help="Number of ships")
     args = parser.parse_args()
-
-    if args.constellation not in _CONSTELLATION_FULL:
-        print(f"Unknown constellation: {args.constellation}")
-        print(f"Available: {list(_CONSTELLATION_FULL.keys())}")
-        sys.exit(1)
 
     core = DemoSimCore(
         host=args.host,
         port=args.port,
-        constellation_name=args.constellation,
-        shell_index=args.shell,
+        num_orbits=args.num_orbits,
+        sats_per_orbit=args.sats_per_orbit,
+        num_uavs=args.num_uavs,
+        num_ships=args.num_ships,
     )
     await core.run()
 

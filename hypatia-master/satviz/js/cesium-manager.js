@@ -1,6 +1,7 @@
 /**
- * Cesium Manager Module
- * Handles 3D scene management and visualization
+ * Cesium Manager Module v2 — Multi-Domain Rendering
+ * Handles 3D scene management for satellites, UAVs, ships, ground stations,
+ * and four link types (ISL / GSL / SUL / SSL).
  */
 
 class CesiumManager {
@@ -8,32 +9,98 @@ class CesiumManager {
         this.containerId = containerId;
         this.viewer = null;
         this.scene = null;
+
+        // Unified entity stores
         this.entities = {
-            satellites: new Map(),
-            stations: new Map(),
-            links: new Map(),
+            nodes: new Map(),   // nodeId -> Cesium entity (all types)
+            links: new Map(),   // linkId -> Cesium entity
         };
+
+        // Node type metadata
+        this.nodeTypes = {
+            satellite: {
+                color: Cesium.Color.DODGERBLUE,
+                pixelSize: 5,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 1,
+                labelShow: false,
+                labelFont: '11px sans-serif',
+            },
+            uav: {
+                color: Cesium.Color.LIMEGREEN,
+                pixelSize: 7,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 1,
+                labelShow: false,
+                labelFont: '11px sans-serif',
+            },
+            ship: {
+                color: Cesium.Color.ORANGE,
+                pixelSize: 6,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 1,
+                labelShow: false,
+                labelFont: '11px sans-serif',
+            },
+            ground_station: {
+                color: Cesium.Color.ORANGERED,
+                pixelSize: 10,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 2,
+                labelShow: true,
+                labelFont: '12px sans-serif',
+            },
+        };
+
+        // Link type base colors (from protocol v2)
+        this.linkTypeColors = {
+            isl: Cesium.Color.fromCssColorString('#4FC3F7'),
+            gsl: Cesium.Color.fromCssColorString('#FF8A65'),
+            sul: Cesium.Color.fromCssColorString('#81C784'),
+            ssl: Cesium.Color.fromCssColorString('#FFB74D'),
+        };
+
         this.cesiumToken = options.cesiumToken || '';
-        this.visibleSatellites = new Set();
-        this.visibleStations = new Set();
         this.selectedEntity = null;
         this.metricsMode = 'none';
         this.animationSpeed = 1.0;
 
+        // Visibility toggles per node type
+        this.typeVisibility = {
+            satellite: true,
+            uav: true,
+            ship: true,
+            ground_station: true,
+        };
+
+        // Link type visibility
+        this.linkTypeVisibility = {
+            isl: true,
+            gsl: true,
+            sul: true,
+            ssl: true,
+        };
+
         this.stats = {
             satellites: 0,
-            stations: 0,
+            uavs: 0,
+            ships: 0,
+            ground_stations: 0,
             links: 0,
             fps: 0,
         };
 
         this.frameCount = 0;
         this.lastFpsTime = Date.now();
+
+        // Highlighted route path
+        this._highlightedLinks = new Set();
     }
 
-    /**
-     * Initialize Cesium viewer
-     */
+    // ======================================================================
+    // Initialization
+    // ======================================================================
+
     initialize() {
         try {
             if (this.cesiumToken) {
@@ -57,64 +124,27 @@ class CesiumManager {
             });
 
             this.scene = this.viewer.scene;
-
-            // Configure scene
-            this.scene.backgroundColor = Cesium.Color.fromCssColorString('#0a1628');
+            this.scene.backgroundColor = Cesium.Color.BLACK;
             this.scene.highDynamicRange = false;
 
-            // Disable day/night lighting so the entire globe surface is uniformly
-            // visible — satellites and links stay visible against the Earth at all
-            // longitudes, not just the sunlit hemisphere.
-            this.scene.globe.enableLighting = false;
-            // Light base color as fallback before imagery tiles load.
-            this.scene.globe.baseColor = Cesium.Color.fromCssColorString('#1a3a5c');
-
-            // Replace default (Bing) imagery with NaturalEarthII tiles loaded
-            // via UrlTemplateImageryProvider.  Uses <img> tags (no CORS) so
-            // the tilemapresource.xml XHR step is skipped entirely.
-            // Use the full CDN URL directly instead of buildModuleUrl to
-            // guarantee the {z}/{x}/{reverseY} template variables stay
-            // literal and aren't percent-encoded.
+            // Dark-style base map
             this.viewer.imageryLayers.removeAll();
             this.viewer.imageryLayers.addImageryProvider(
-                new Cesium.UrlTemplateImageryProvider({
-                    url: 'https://cesium.com/downloads/cesiumjs/releases/1.141/Build/Cesium/Assets/Textures/NaturalEarthII/{z}/{x}/{reverseY}.jpg',
-                    tilingScheme: new Cesium.GeographicTilingScheme(),
-                    maximumLevel: 2,
+                new Cesium.TileMapServiceImageryProvider({
+                    url: Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII'),
                 })
             );
 
-            // Configure camera
+            // Initial camera: Asia-Pacific overview
             this.viewer.camera.flyTo({
-                destination: Cesium.Cartesian3.fromDegrees(0, 20, 25000000),
+                destination: Cesium.Cartesian3.fromDegrees(110, 20, 25000000),
                 duration: 2,
             });
 
-            // Move InfoBox to top-left so it doesn't overlap the control panel.
-            // Cesium 1.141 defaults: position:absolute; top:50px; right:0;
-            // border-right:none.
-            const ib = this.viewer.container.querySelector('.cesium-infoBox');
-            if (ib) {
-                ib.style.setProperty('left', '10px', 'important');
-                ib.style.setProperty('right', 'auto', 'important');
-                ib.style.setProperty('top', '50px', 'important');
-                // Flip border: was right-anchored (border-right:none),
-                // now left-anchored → border-left:none, radii on right side.
-                ib.style.setProperty('border-left', 'none', 'important');
-                ib.style.setProperty('border-right', '1px solid #444', 'important');
-                ib.style.setProperty('border-top-left-radius', '0', 'important');
-                ib.style.setProperty('border-bottom-left-radius', '0', 'important');
-                ib.style.setProperty('border-top-right-radius', '7px', 'important');
-                ib.style.setProperty('border-bottom-right-radius', '7px', 'important');
-            }
-
-            // Set up event handlers
             this.setupEventHandlers();
-
-            // Start FPS counter
             this.startFpsCounter();
 
-            console.log('[CesiumManager] Viewer initialized successfully');
+            console.log('[CesiumManager] Viewer initialized (v2 multi-domain)');
             return true;
 
         } catch (error) {
@@ -123,36 +153,27 @@ class CesiumManager {
         }
     }
 
-    /**
-     * Set up event handlers for picking and selection
-     */
     setupEventHandlers() {
         const handler = new Cesium.ScreenSpaceEventHandler(this.scene.canvas);
 
-        // Left click - select entity
         handler.setInputAction((click) => {
-            const pickedObject = this.scene.pick(click.position);
-            if (pickedObject && pickedObject.id) {
-                this.selectEntity(pickedObject.id);
+            const picked = this.scene.pick(click.position);
+            if (picked && picked.id) {
+                this.selectEntity(picked.id);
             } else {
                 this.selectEntity(null);
             }
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
-        // Right click - deselect
         handler.setInputAction(() => {
             this.selectEntity(null);
         }, Cesium.ScreenSpaceEventType.RIGHT_CLICK);
     }
 
-    /**
-     * Start FPS counter
-     */
     startFpsCounter() {
         this.viewer.scene.postRender.addEventListener(() => {
             this.frameCount++;
         });
-
         setInterval(() => {
             const now = Date.now();
             const elapsed = (now - this.lastFpsTime) / 1000;
@@ -164,439 +185,551 @@ class CesiumManager {
         }, 1000);
     }
 
-    /**
-     * Select an entity and highlight it
-     */
+    // ======================================================================
+    // Entity Selection
+    // ======================================================================
+
     selectEntity(entity) {
-        // Deselect previous
+        // Restore previous selection
         if (this.selectedEntity && this.selectedEntity.id) {
-            const prevProps = this.selectedEntity.properties;
-            if (prevProps) {
-                if (prevProps.type.getValue() === 'link') {
-                    const origColor = prevProps.color
-                        ? prevProps.color.getValue()
-                        : Cesium.Color.WHITE;
-                    this.selectedEntity.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                        color: origColor,
-                    });
-                    this.selectedEntity.polyline.width = new Cesium.ConstantProperty(1);
-                } else if (prevProps.type.getValue() === 'satellite') {
-                    this.selectedEntity.point.color = new Cesium.ConstantProperty(Cesium.Color.DODGERBLUE);
-                    this.selectedEntity.point.pixelSize = new Cesium.ConstantProperty(5);
-                } else if (prevProps.type.getValue() === 'station') {
-                    this.selectedEntity.point.color = new Cesium.ConstantProperty(Cesium.Color.ORANGERED);
-                    this.selectedEntity.point.pixelSize = new Cesium.ConstantProperty(8);
-                }
-            }
+            this._restoreEntityStyle(this.selectedEntity);
         }
 
-        // Select new
         this.selectedEntity = entity;
-        if (entity && entity.properties) {
-            const type = entity.properties.type.getValue();
-            if (type === 'link') {
-                entity.polyline.material = new Cesium.PolylineGlowMaterialProperty({
-                    glowPower: 0.25,
-                    color: Cesium.Color.CYAN,
-                });
-                entity.polyline.width = new Cesium.ConstantProperty(3);
-            } else if (type === 'satellite') {
-                entity.point.color = new Cesium.ConstantProperty(Cesium.Color.CYAN);
-                entity.point.pixelSize = new Cesium.ConstantProperty(10);
-            } else if (type === 'station') {
-                entity.point.color = new Cesium.ConstantProperty(Cesium.Color.YELLOW);
-                entity.point.pixelSize = new Cesium.ConstantProperty(14);
+
+        if (!entity || !entity.properties) return;
+
+        const type = entity.properties.type
+            ? entity.properties.type.getValue()
+            : null;
+
+        if (type === 'link') {
+            entity.polyline.material = new Cesium.PolylineGlowMaterialProperty({
+                glowPower: 0.25,
+                color: Cesium.Color.CYAN,
+            });
+            entity.polyline.width = new Cesium.ConstantProperty(3);
+        } else if (type && this.nodeTypes[type]) {
+            entity.point.color = new Cesium.ConstantProperty(Cesium.Color.CYAN);
+            entity.point.pixelSize = new Cesium.ConstantProperty(
+                this.nodeTypes[type].pixelSize + 5
+            );
+            if (entity.label) {
+                entity.label.show = new Cesium.ConstantProperty(true);
             }
         }
     }
 
+    _restoreEntityStyle(entity) {
+        if (!entity.properties) return;
+        const type = entity.properties.type
+            ? entity.properties.type.getValue()
+            : null;
+
+        if (type === 'link') {
+            const linkType = entity.properties.linkType
+                ? entity.properties.linkType.getValue()
+                : 'isl';
+            const util = entity.properties.bandwidth_utilization
+                ? entity.properties.bandwidth_utilization.getValue()
+                : 0;
+            const color = this._getLinkDisplayColor(linkType, util);
+            entity.polyline.material = new Cesium.PolylineDashMaterialProperty({
+                color: color,
+            });
+            entity.polyline.width = new Cesium.ConstantProperty(
+                this._getLinkWidth(linkType)
+            );
+        } else if (type && this.nodeTypes[type]) {
+            const style = this.nodeTypes[type];
+            entity.point.color = new Cesium.ConstantProperty(style.color);
+            entity.point.pixelSize = new Cesium.ConstantProperty(style.pixelSize);
+            if (entity.label) {
+                entity.label.show = new Cesium.ConstantProperty(style.labelShow);
+            }
+        }
+    }
+
+    // ======================================================================
+    // Node Management (unified)
+    // ======================================================================
+
     /**
-     * Add or update satellite
+     * Add or update any node (satellite / uav / ship / ground_station).
+     * @param {string} nodeId - Unique identifier
+     * @param {string} nodeType - One of: satellite, uav, ship, ground_station
+     * @param {{lat, lon, alt}} position - WGS84 position
+     * @param {object} properties - Extra metadata (label, group, etc.)
      */
-    addOrUpdateSatellite(satelliteId, position, properties = {}) {
+    addOrUpdateNode(nodeId, nodeType, position, properties = {}) {
         try {
+            const alt = position.alt || 0;
             const cartesian = Cesium.Cartesian3.fromDegrees(
-                position.lon, position.lat, position.alt
+                position.lon, position.lat, alt
             );
 
-            if (!this.entities.satellites.has(satelliteId)) {
-                const satellite = this.viewer.entities.add({
-                    id: `sat-${satelliteId}`,
+            const style = this.nodeTypes[nodeType] || this.nodeTypes.satellite;
+            const label = properties.label || nodeId;
+
+            if (!this.entities.nodes.has(nodeId)) {
+                // Create new entity
+                const entity = this.viewer.entities.add({
+                    id: `${nodeType}-${nodeId}`,
                     position: cartesian,
                     point: {
-                        pixelSize: 5,
-                        color: Cesium.Color.DODGERBLUE,
-                        outlineColor: Cesium.Color.WHITE,
-                        outlineWidth: 1,
+                        pixelSize: style.pixelSize,
+                        color: style.color,
+                        outlineColor: style.outlineColor,
+                        outlineWidth: style.outlineWidth,
                         disableDepthTestDistance: Number.POSITIVE_INFINITY,
                     },
                     label: {
-                        text: properties.name || satelliteId,
-                        font: '11px sans-serif',
+                        text: label,
+                        font: style.labelFont,
                         fillColor: Cesium.Color.WHITE,
                         outlineColor: Cesium.Color.BLACK,
                         outlineWidth: 2,
-                        pixelOffset: new Cesium.Cartesian2(0, -12),
-                        show: false,
+                        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+                        pixelOffset: new Cesium.Cartesian2(0, -14),
+                        show: style.labelShow,
                         disableDepthTestDistance: Number.POSITIVE_INFINITY,
                     },
                     properties: {
-                        type: 'satellite',
-                        satelliteId: satelliteId,
+                        type: nodeType,
+                        nodeId: nodeId,
+                        label: label,
                         ...properties,
                     },
                 });
 
-                this.entities.satellites.set(satelliteId, satellite);
-                this.stats.satellites++;
-            } else {
-                const satellite = this.entities.satellites.get(satelliteId);
-                satellite.position = cartesian;
+                // Apply visibility
+                entity.show = this.typeVisibility[nodeType] !== false;
 
+                this.entities.nodes.set(nodeId, entity);
+
+                // Update stats
+                const statKey = nodeType === 'ground_station'
+                    ? 'ground_stations'
+                    : nodeType + 's';
+                if (this.stats[statKey] !== undefined) {
+                    this.stats[statKey]++;
+                }
+            } else {
+                // Update existing entity position
+                const entity = this.entities.nodes.get(nodeId);
+                entity.position = cartesian;
+
+                // Update dynamic properties (heading, etc.)
                 for (const [key, value] of Object.entries(properties)) {
-                    if (satellite.properties.hasProperty(key)) {
-                        satellite.properties[key] = value;
+                    if (entity.properties.hasProperty(key)) {
+                        entity.properties[key] = value;
                     } else {
-                        satellite.properties.addProperty(key, value);
+                        entity.properties.addProperty(key, value);
                     }
                 }
             }
 
-            return this.entities.satellites.get(satelliteId);
+            return this.entities.nodes.get(nodeId);
 
         } catch (error) {
-            console.error('[CesiumManager] Error adding satellite:', satelliteId, error);
+            console.error(`[CesiumManager] Error addOrUpdateNode(${nodeId}):`, error);
             return null;
         }
     }
 
-    /**
-     * Add or update ground station
-     */
+    // Backward-compatible wrappers
+    addOrUpdateSatellite(satId, position, properties = {}) {
+        return this.addOrUpdateNode(satId, 'satellite', position, properties);
+    }
+
     addOrUpdateStation(stationId, position, properties = {}) {
-        try {
-            const cartesian = Cesium.Cartesian3.fromDegrees(
-                position.lon, position.lat, 0
-            );
-
-            if (!this.entities.stations.has(stationId)) {
-                const station = this.viewer.entities.add({
-                    id: `sta-${stationId}`,
-                    position: cartesian,
-                    point: {
-                        pixelSize: 8,
-                        color: Cesium.Color.ORANGERED,
-                        outlineColor: Cesium.Color.WHITE,
-                        outlineWidth: 2,
-                        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-                    },
-                    label: {
-                        text: properties.name || stationId,
-                        font: '12px sans-serif',
-                        fillColor: Cesium.Color.WHITE,
-                        outlineColor: Cesium.Color.BLACK,
-                        outlineWidth: 2,
-                        pixelOffset: new Cesium.Cartesian2(0, -18),
-                        disableDepthTestDistance: Number.POSITIVE_INFINITY,
-                    },
-                    properties: {
-                        type: 'station',
-                        stationId: stationId,
-                        ...properties,
-                    },
-                });
-
-                this.entities.stations.set(stationId, station);
-                this.stats.stations++;
-            } else {
-                const station = this.entities.stations.get(stationId);
-                station.position = cartesian;
-
-                for (const [key, value] of Object.entries(properties)) {
-                    if (station.properties.hasProperty(key)) {
-                        station.properties[key] = value;
-                    } else {
-                        station.properties.addProperty(key, value);
-                    }
-                }
-            }
-
-            return this.entities.stations.get(stationId);
-
-        } catch (error) {
-            console.error('[CesiumManager] Error adding station:', stationId, error);
-            return null;
-        }
+        return this.addOrUpdateNode(stationId, 'ground_station', position, properties);
     }
 
+    addOrUpdateUAV(uavId, position, properties = {}) {
+        return this.addOrUpdateNode(uavId, 'uav', position, properties);
+    }
+
+    addOrUpdateShip(shipId, position, properties = {}) {
+        return this.addOrUpdateNode(shipId, 'ship', position, properties);
+    }
+
+    // ======================================================================
+    // Link Management
+    // ======================================================================
+
     /**
-     * Add or update link between two entities
+     * Add or update a link between two nodes.
+     * @param {string} linkId - Unique link identifier (e.g. "Sat-0-1--Sat-0-2")
+     * @param {string} source - Source node ID
+     * @param {string} target - Target node ID
+     * @param {object} properties - {type, is_active, bandwidth_utilization, latency_ms, loss_rate}
      */
     addOrUpdateLink(linkId, source, target, properties = {}) {
         try {
-            const sourceEntity =
-                this.entities.satellites.get(source) || this.entities.stations.get(source);
-            const targetEntity =
-                this.entities.satellites.get(target) || this.entities.stations.get(target);
+            const sourceEntity = this.entities.nodes.get(source);
+            const targetEntity = this.entities.nodes.get(target);
 
             if (!sourceEntity || !targetEntity) {
                 return null;
             }
 
+            const linkType = properties.type || 'isl';
+            const util = properties.bandwidth_utilization || 0;
+
             if (!this.entities.links.has(linkId)) {
-                var cw = this._colorForMode(this.metricsMode, properties);
-                var linkColor = cw.color;
-                var linkWidth = this._widthForNorm(cw.norm);
+                const color = this._getLinkDisplayColor(linkType, util);
+                const width = this._getLinkWidth(linkType);
 
                 const link = this.viewer.entities.add({
-                    id: `link-${linkId}`,
-                    name: `Link ${source} ↔ ${target}`,
-                    description: this._buildLinkDescription(properties, this.metricsMode),
                     polyline: {
                         positions: new Cesium.CallbackProperty(() => {
                             const srcPos = sourceEntity.position
-                                ? sourceEntity.position.getValue(this.viewer.clock.currentTime)
+                                ? sourceEntity.position.getValue(
+                                      this.viewer.clock.currentTime
+                                  )
                                 : null;
                             const tgtPos = targetEntity.position
-                                ? targetEntity.position.getValue(this.viewer.clock.currentTime)
+                                ? targetEntity.position.getValue(
+                                      this.viewer.clock.currentTime
+                                  )
                                 : null;
                             if (!srcPos || !tgtPos) return [];
                             return [srcPos, tgtPos];
                         }, false),
-                        width: linkWidth,
+                        width: width,
                         material: new Cesium.PolylineDashMaterialProperty({
-                            color: linkColor,
+                            color: color,
                         }),
                         clampToGround: false,
                     },
                     properties: {
                         type: 'link',
+                        linkType: linkType,
                         linkId: linkId,
                         source: source,
                         target: target,
-                        bandwidth_utilization: properties.bandwidth_utilization || 0,
-                        latency: properties.latency || 0,
-                        loss_base: properties.loss_base != null ? properties.loss_base : 0,
-                        loss_jitter: properties.loss_jitter != null ? properties.loss_jitter : 0,
+                        bandwidth_utilization: util,
+                        latency_ms: properties.latency_ms || 0,
                         loss_rate: properties.loss_rate || 0,
                         is_active: properties.is_active !== false,
-                        color: linkColor,
                     },
                 });
+
+                // Apply link type visibility
+                link.show = this.linkTypeVisibility[linkType] !== false;
 
                 this.entities.links.set(linkId, link);
                 this.stats.links++;
             } else {
+                // Update existing link
                 const link = this.entities.links.get(linkId);
+                const color = this._getLinkDisplayColor(linkType, util);
 
-                // Store new property values first
-                link.properties.bandwidth_utilization = properties.bandwidth_utilization || 0;
-                link.properties.latency = properties.latency || 0;
-                link.properties.loss_base = properties.loss_base != null ? properties.loss_base : 0;
-                link.properties.loss_jitter = properties.loss_jitter != null ? properties.loss_jitter : 0;
+                if (!this._highlightedLinks.has(linkId)) {
+                    link.polyline.material = new Cesium.PolylineDashMaterialProperty({
+                        color: color,
+                    });
+                }
+
+                // Update properties
+                link.properties.bandwidth_utilization = util;
+                link.properties.latency_ms = properties.latency_ms || 0;
                 link.properties.loss_rate = properties.loss_rate || 0;
                 link.properties.is_active = properties.is_active !== false;
-
-                // Color + width by current metric mode
-                var cw = this._colorForMode(this.metricsMode, link.properties);
-                link.properties.color = cw.color;
-                link.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                    color: cw.color,
-                });
-                link.polyline.width = this._widthForNorm(cw.norm);
-
-                // Keep the InfoBox description up-to-date
-                link.description = this._buildLinkDescription(properties, this.metricsMode);
             }
 
             return this.entities.links.get(linkId);
 
         } catch (error) {
-            console.error('[CesiumManager] Error adding link:', linkId, error);
+            console.error(`[CesiumManager] Error addOrUpdateLink(${linkId}):`, error);
             return null;
         }
     }
 
     /**
-     * Build HTML description for the Cesium InfoBox when a link is clicked.
+     * Remove a link that is no longer active.
      */
-    _buildLinkDescription(props, mode) {
-        var modeKey = mode || this.metricsMode || 'none';
-        var bw = ((props.bandwidth_utilization || 0) * 100).toFixed(0);
-        var lat = (props.latency || 0).toFixed(1);
-        var base = ((props.loss_base != null ? props.loss_base : 0) * 100).toFixed(2);
-        var jitter = ((props.loss_jitter != null ? props.loss_jitter : 0) * 100).toFixed(2);
-        var total = ((props.loss_rate || 0) * 100).toFixed(2);
-        var active = props.is_active !== false;
-
-        var td = 'style="padding:3px 12px 3px 0;color:#aaa;"';
-        var tv = 'style="padding:3px 0;font-weight:600;"';
-
-        var html = '<table style="font-size:13px;border-collapse:collapse;">';
-
-        switch (modeKey) {
-            case 'bandwidth':
-                html += '<tr><td ' + td + '>Bandwidth</td><td ' + tv + '>' + bw + '%</td></tr>';
-                break;
-            case 'latency':
-                html += '<tr><td ' + td + '>Latency</td><td ' + tv + '>' + lat + ' ms</td></tr>';
-                break;
-            case 'loss_rate':
-                html += '<tr><td ' + td + '>Packet Loss Rate</td><td ' + tv + '>' + total + '%</td></tr>';
-                html += '<tr><td ' + td + '>&nbsp;&nbsp;Scenario Base</td><td style="padding:3px 0;">' + base + '%</td></tr>';
-                html += '<tr><td ' + td + '>&nbsp;&nbsp;Jitter</td><td style="padding:3px 0;">' + jitter + '%</td></tr>';
-                break;
-            case 'link_status':
-                html += '<tr><td ' + td + '>Status</td><td ' + tv + ' style="color:' + (active ? '#4caf50' : '#f44336') + '">' + (active ? 'Active' : 'Inactive') + '</td></tr>';
-                break;
-            default:
-                html += '<tr><td ' + td + '>Bandwidth</td><td ' + tv + '>' + bw + '%</td></tr>';
-                html += '<tr><td ' + td + '>Latency</td><td ' + tv + '>' + lat + ' ms</td></tr>';
-                html += '<tr><td ' + td + '>Loss Rate</td><td style="padding:3px 0;">' + total + '%</td></tr>';
-                break;
+    removeLink(linkId) {
+        const link = this.entities.links.get(linkId);
+        if (link) {
+            this.viewer.entities.remove(link);
+            this.entities.links.delete(linkId);
+            this._highlightedLinks.delete(linkId);
+            this.stats.links = Math.max(0, this.stats.links - 1);
         }
-
-        html += '</table>';
-        return html;
-    }
-
-    // ---- Color-stop tables (normalized 0-1 → hex values) ----
-
-    /** Generic piecewise-linear color interpolator over stops [{t, r, g, b}] */
-    _interpolateColor(u, stops) {
-        var v = Math.max(0, Math.min(1, u));
-        var lo = stops[0], hi = stops[stops.length - 1];
-        for (var i = 0; i < stops.length - 1; i++) {
-            if (v >= stops[i].t && v <= stops[i + 1].t) { lo = stops[i]; hi = stops[i + 1]; break; }
-        }
-        var seg = hi.t - lo.t;
-        var f = seg > 0 ? (v - lo.t) / seg : 0;
-        var r = Math.round(lo.r + (hi.r - lo.r) * f);
-        var g = Math.round(lo.g + (hi.g - lo.g) * f);
-        var b = Math.round(lo.b + (hi.b - lo.b) * f);
-        return new Cesium.Color(r / 255, g / 255, b / 255, 1.0);
-    }
-
-    /** Bandwidth utilization → green-yellow-orange-red (5-segment) */
-    getLinkColor(utilization) {
-        return this._interpolateColor(utilization, [
-            { t: 0.0,  r: 0x00, g: 0x64, b: 0x00 },
-            { t: 0.3,  r: 0x00, g: 0xFF, b: 0x00 },
-            { t: 0.5,  r: 0xAD, g: 0xFF, b: 0x2F },
-            { t: 0.7,  r: 0xFF, g: 0xFF, b: 0x00 },
-            { t: 0.85, r: 0xFF, g: 0x8C, b: 0x00 },
-            { t: 1.0,  r: 0x8B, g: 0x00, b: 0x00 },
-        ]);
-    }
-
-    /** End-to-end latency (ms) → cyan-green-yellow-orange-red */
-    getLatencyColor(ms) {
-        return this._interpolateColor(Math.min(1, ms / 100), [
-            { t: 0.0, r: 0x87, g: 0xF5, b: 0xFF },
-            { t: 0.2, r: 0x36, g: 0xE8, b: 0xA8 },
-            { t: 0.4, r: 0xF9, g: 0xF8, b: 0x71 },
-            { t: 0.7, r: 0xFF, g: 0xB3, b: 0x47 },
-            { t: 1.0, r: 0xFF, g: 0x6B, b: 0x35 },
-        ]);
-    }
-
-    /** Packet loss rate (0-1) → blue-cyan-green-orange-red */
-    getLossRateColor(rate) {
-        return this._interpolateColor(Math.min(1, rate * 5), [  // 0.2 (20%) → 1.0
-            { t: 0.0,  r: 0x20, g: 0xA4, b: 0xF3 },
-            { t: 0.05, r: 0x5E, g: 0xD9, b: 0xFF },
-            { t: 0.15, r: 0x64, g: 0xDD, b: 0x78 },
-            { t: 0.35, r: 0xFF, g: 0xC8, b: 0x57 },
-            { t: 0.7,  r: 0xFF, g: 0x57, b: 0x22 },
-            { t: 1.0,  r: 0x9E, g: 0x00, b: 0x00 },
-        ]);
     }
 
     /**
-     * Map the current metric to a color + normalized value for width.
-     * Returns {color, norm} where norm is 0–1 for line width scaling.
+     * Synchronize links: add/update those in `linksData`, remove stale ones.
+     * @param {object} linksData - {linkId: {type, source, target, ...}}
      */
-    _colorForMode(mode, props) {
-        var bw = props.bandwidth_utilization || 0;
-        var lat = props.latency || 0;
-        var loss = props.loss_rate || 0;
-        switch (mode) {
-            case 'bandwidth':   return { color: this.getLinkColor(bw),       norm: bw };
-            case 'latency':     return { color: this.getLatencyColor(lat),   norm: Math.min(1, lat / 100) };
-            case 'loss_rate':   return { color: this.getLossRateColor(loss), norm: Math.min(1, loss * 5) };
-            case 'link_status': return { color: this.getLinkColor(props.is_active !== false ? 0 : 1), norm: 0 };
-            default:            return { color: this.getLinkColor(bw),       norm: bw };
+    syncLinks(linksData) {
+        const incomingIds = new Set(Object.keys(linksData));
+
+        // Remove links no longer present
+        for (const existingId of this.entities.links.keys()) {
+            if (!incomingIds.has(existingId)) {
+                this.removeLink(existingId);
+            }
+        }
+
+        // Add or update incoming links
+        for (const [linkId, data] of Object.entries(linksData)) {
+            this.addOrUpdateLink(linkId, data.source, data.target, data);
         }
     }
 
-    /** Line width from normalized value: 1.2px (min) → 5px (max) */
-    _widthForNorm(norm) {
-        return 1.2 + Math.max(0, Math.min(1, norm)) * 3.8;
+    // ======================================================================
+    // Link Visual Helpers
+    // ======================================================================
+
+    /**
+     * Get link color: in metrics mode use gradient, otherwise use type color
+     * with alpha modulated by utilization.
+     */
+    _getLinkDisplayColor(linkType, utilization) {
+        if (this.metricsMode !== 'none') {
+            let metricValue = 0;
+            switch (this.metricsMode) {
+                case 'bandwidth':
+                    metricValue = utilization;
+                    break;
+                case 'latency':
+                    metricValue = utilization; // caller normalizes
+                    break;
+                case 'loss_rate':
+                    metricValue = utilization;
+                    break;
+                default:
+                    metricValue = utilization;
+            }
+            return this._getGradientColor(metricValue);
+        }
+
+        // Default: type-based color, alpha scaled by utilization
+        const base = this.linkTypeColors[linkType] || Cesium.Color.WHITE;
+        const alpha = 0.3 + 0.7 * Math.max(0, Math.min(1, utilization));
+        return base.withAlpha(alpha);
+    }
+
+    _getLinkWidth(linkType) {
+        // Cross-domain links slightly thicker for visibility
+        switch (linkType) {
+            case 'gsl': return 1.5;
+            case 'sul': return 1.5;
+            case 'ssl': return 1.5;
+            default: return 1.0;
+        }
     }
 
     /**
-     * Set satellite visibility filter
+     * Green (0) -> Yellow (0.5) -> Red (1.0) gradient
      */
+    _getGradientColor(value) {
+        const u = Math.max(0, Math.min(1, value));
+        let r, g, b;
+        if (u < 0.5) {
+            r = u * 2;
+            g = 1;
+            b = 0;
+        } else {
+            r = 1;
+            g = 1 - (u - 0.5) * 2;
+            b = 0;
+        }
+        return new Cesium.Color(r, g, b, 1.0);
+    }
+
+    // ======================================================================
+    // Visibility & Filtering
+    // ======================================================================
+
+    /**
+     * Toggle visibility of an entire node type.
+     */
+    setNodeTypeVisibility(nodeType, visible) {
+        this.typeVisibility[nodeType] = visible;
+        for (const [id, entity] of this.entities.nodes.entries()) {
+            if (entity.properties.type &&
+                entity.properties.type.getValue() === nodeType) {
+                entity.show = visible;
+            }
+        }
+    }
+
+    /**
+     * Toggle visibility of a link type.
+     */
+    setLinkTypeVisibility(linkType, visible) {
+        this.linkTypeVisibility[linkType] = visible;
+        for (const [id, link] of this.entities.links.entries()) {
+            if (link.properties.linkType &&
+                link.properties.linkType.getValue() === linkType) {
+                link.show = visible;
+            }
+        }
+    }
+
+    /**
+     * Filter specific node IDs visible (empty = show all of that type).
+     */
+    setNodeFilter(nodeType, visibleIds) {
+        const idSet = new Set(visibleIds);
+        for (const [id, entity] of this.entities.nodes.entries()) {
+            if (entity.properties.type &&
+                entity.properties.type.getValue() === nodeType) {
+                entity.show = visibleIds.length === 0 || idSet.has(id);
+            }
+        }
+    }
+
+    // Backward-compatible
     setSatelliteFilter(visibleIds) {
-        this.visibleSatellites = new Set(visibleIds);
-
-        for (const [id, satellite] of this.entities.satellites.entries()) {
-            satellite.show = visibleIds.length === 0 || this.visibleSatellites.has(id);
-        }
+        this.setNodeFilter('satellite', visibleIds);
     }
 
-    /**
-     * Set station visibility filter
-     */
     setStationFilter(visibleIds) {
-        this.visibleStations = new Set(visibleIds);
-
-        for (const [id, station] of this.entities.stations.entries()) {
-            station.show = visibleIds.length === 0 || this.visibleStations.has(id);
-        }
+        this.setNodeFilter('ground_station', visibleIds);
     }
 
-    /**
-     * Clear all entities
-     */
-    clearAll() {
-        this.selectedEntity = null;
-        this.viewer.entities.removeAll();
-        this.entities.satellites.clear();
-        this.entities.stations.clear();
-        this.entities.links.clear();
-        this.stats.satellites = 0;
-        this.stats.stations = 0;
-        this.stats.links = 0;
-    }
+    // ======================================================================
+    // Metrics Mode
+    // ======================================================================
 
-    /**
-     * Clear all entities for constellation switch (alias for clearAll).
-     */
-    clearAllEntities() {
-        this.clearAll();
-    }
-
-    /**
-     * Set metrics display mode
-     */
     setMetricsMode(mode) {
         this.metricsMode = mode;
 
         for (const [linkId, link] of this.entities.links.entries()) {
+            if (this._highlightedLinks.has(linkId)) continue;
+
             const props = link.properties;
-            var cw = this._colorForMode(mode, props);
+            const linkType = props.linkType ? props.linkType.getValue() : 'isl';
+            let metricValue = 0;
+
+            switch (mode) {
+                case 'bandwidth':
+                    metricValue = props.bandwidth_utilization || 0;
+                    break;
+                case 'latency':
+                    metricValue = Math.min(1, (props.latency_ms || 0) / 50);
+                    break;
+                case 'loss_rate':
+                    metricValue = Math.min(1, (props.loss_rate || 0) * 100);
+                    break;
+                case 'link_status':
+                    metricValue = (props.is_active) ? 0 : 1;
+                    break;
+                default:
+                    metricValue = props.bandwidth_utilization || 0;
+                    break;
+            }
+
+            const color = mode === 'none'
+                ? this._getLinkDisplayColor(linkType, props.bandwidth_utilization || 0)
+                : this._getGradientColor(metricValue);
+
             link.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                color: cw.color,
+                color: color,
             });
-            link.polyline.width = this._widthForNorm(cw.norm);
-            link.description = this._buildLinkDescription(props, mode);
         }
     }
 
-    /**
-     * Set animation speed
-     */
+    // ======================================================================
+    // Route Highlighting
+    // ======================================================================
+
+    highlightRoute(pathNodes) {
+        this.clearRouteHighlights();
+
+        if (!pathNodes || pathNodes.length < 2) return;
+
+        for (let i = 0; i < pathNodes.length - 1; i++) {
+            // Try both orderings of link ID
+            const id1 = `${pathNodes[i]}--${pathNodes[i + 1]}`;
+            const id2 = `${pathNodes[i + 1]}--${pathNodes[i]}`;
+            const link = this.entities.links.get(id1) || this.entities.links.get(id2);
+            if (link) {
+                link.polyline.material = new Cesium.PolylineGlowMaterialProperty({
+                    glowPower: 0.3,
+                    color: Cesium.Color.CYAN,
+                });
+                link.polyline.width = new Cesium.ConstantProperty(3);
+                this._highlightedLinks.add(link.properties.linkId
+                    ? link.properties.linkId.getValue()
+                    : id1);
+            }
+        }
+    }
+
+    clearRouteHighlights() {
+        for (const linkId of this._highlightedLinks) {
+            const link = this.entities.links.get(linkId);
+            if (link && link !== this.selectedEntity) {
+                const linkType = link.properties.linkType
+                    ? link.properties.linkType.getValue()
+                    : 'isl';
+                const util = link.properties.bandwidth_utilization || 0;
+                const color = this._getLinkDisplayColor(linkType, util);
+                link.polyline.material = new Cesium.PolylineDashMaterialProperty({
+                    color: color,
+                });
+                link.polyline.width = new Cesium.ConstantProperty(
+                    this._getLinkWidth(linkType)
+                );
+            }
+        }
+        this._highlightedLinks.clear();
+    }
+
+    // ======================================================================
+    // Camera / View Presets
+    // ======================================================================
+
+    flyToNode(nodeId) {
+        const entity = this.entities.nodes.get(nodeId);
+        if (!entity) return;
+
+        const pos = entity.position
+            ? entity.position.getValue(this.viewer.clock.currentTime)
+            : null;
+        if (!pos) return;
+
+        this.viewer.camera.flyTo({
+            destination: Cesium.Cartesian3.fromDegrees(
+                ...this._cartesianToDegrees(pos),
+            ),
+            duration: 1.5,
+        });
+    }
+
+    flyToPreset(preset) {
+        const presets = {
+            global: { lon: 110, lat: 20, alt: 25000000 },
+            south_china_sea: { lon: 116, lat: 18, alt: 2000000 },
+            asia_pacific: { lon: 120, lat: 25, alt: 12000000 },
+            europe: { lon: 10, lat: 50, alt: 8000000 },
+        };
+        const p = presets[preset] || presets.global;
+        this.viewer.camera.flyTo({
+            destination: Cesium.Cartesian3.fromDegrees(p.lon, p.lat, p.alt),
+            duration: 2,
+        });
+    }
+
+    _cartesianToDegrees(cartesian) {
+        const carto = Cesium.Cartographic.fromCartesian(cartesian);
+        return [
+            Cesium.Math.toDegrees(carto.longitude),
+            Cesium.Math.toDegrees(carto.latitude),
+            carto.height + 500000, // offset above
+        ];
+    }
+
+    // ======================================================================
+    // Utilities
+    // ======================================================================
+
     setAnimationSpeed(speed) {
         this.animationSpeed = speed;
         if (this.viewer) {
@@ -604,51 +737,23 @@ class CesiumManager {
         }
     }
 
-    /**
-     * Get statistics
-     */
-    getStats() {
-        return {
-            satellites: this.stats.satellites,
-            stations: this.stats.stations,
-            links: this.stats.links,
+    clearAll() {
+        this.viewer.entities.removeAll();
+        this.entities.nodes.clear();
+        this.entities.links.clear();
+        this._highlightedLinks.clear();
+        this.stats = {
+            satellites: 0,
+            uavs: 0,
+            ships: 0,
+            ground_stations: 0,
+            links: 0,
             fps: this.stats.fps,
         };
     }
 
-    /**
-     * Highlight a specific route path
-     */
-    highlightRoute(pathNodes) {
-        if (!pathNodes || pathNodes.length < 2) return;
-
-        for (let i = 0; i < pathNodes.length - 1; i++) {
-            const linkId = `${pathNodes[i]}-${pathNodes[i + 1]}`;
-            const link = this.entities.links.get(linkId);
-            if (link) {
-                link.polyline.material = new Cesium.PolylineGlowMaterialProperty({
-                    glowPower: 0.3,
-                    color: Cesium.Color.CYAN,
-                });
-                link.polyline.width = new Cesium.ConstantProperty(3);
-            }
-        }
-    }
-
-    /**
-     * Reset all route highlights to utilization-based colors
-     */
-    clearRouteHighlights() {
-        for (const [linkId, link] of this.entities.links.entries()) {
-            if (link !== this.selectedEntity) {
-                const utilization = link.properties.bandwidth_utilization || 0;
-                const color = this.getLinkColor(utilization);
-                link.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                    color: color,
-                });
-                link.polyline.width = new Cesium.ConstantProperty(1);
-            }
-        }
+    getStats() {
+        return { ...this.stats };
     }
 }
 
