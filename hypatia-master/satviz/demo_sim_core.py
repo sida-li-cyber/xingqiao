@@ -937,9 +937,11 @@ class DemoSimCore:
                     # Send init
                     init_msg = self.get_init_message()
                     await ws.send(json.dumps(init_msg))
-                    print("Sent simulation_init (v2)")
+                    print("Sent simulation_init (v3)")
 
                     self.running = True
+                    retry_count = 0      # healthy session: reset backoff counter
+                    dropped = False      # True if the connection died mid-run
 
                     while self.running:
                         loop_start = time.time()
@@ -952,8 +954,9 @@ class DemoSimCore:
                         except asyncio.TimeoutError:
                             pass
                         except websockets.exceptions.ConnectionClosed:
-                            print("\nConnection closed by server")
+                            print("\nConnection closed by server - reconnecting...")
                             self.running = False
+                            dropped = True
                             break
 
                         # Advance time
@@ -966,13 +969,23 @@ class DemoSimCore:
 
                         # Send state
                         state_msg = self.get_state_update()
-                        await ws.send(json.dumps(state_msg))
+                        try:
+                            await ws.send(json.dumps(state_msg))
+                        except websockets.exceptions.ConnectionClosed:
+                            print("\nSend failed, connection lost - reconnecting...")
+                            self.running = False
+                            dropped = True
+                            break
 
                         # Maintain rate
                         elapsed = time.time() - loop_start
                         await asyncio.sleep(max(0, self.update_interval - elapsed))
 
-                    break
+                    if not dropped:
+                        break            # clean shutdown: exit the retry loop
+                    # else: connection died mid-run -> loop and reconnect.
+                    # The sim-time gap (> MAX_DES_STEP) makes _des_step flush
+                    # the DES, so counters restart from a consistent state.
 
             except (ConnectionRefusedError, OSError) as e:
                 retry_count += 1

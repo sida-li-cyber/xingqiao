@@ -36,7 +36,9 @@ It consists of five main components:
   playback controls, and dynamic 3D scene updates. The frontend is a modular vanilla JS
   application (`static_html/js/`) with a detailed frontend integration guide in
   `satviz/FRONTEND_README.md`. Also includes `wstest.html` for WebSocket testing and
-  `test_constellation.py` for constellation validation. More information can be found in `satviz/README.md`.
+  the packet-level DES engine (`packet_sim.py`) with its validation suites
+  (`test_packet_sim.py`, `test_phase3.py`, `test_phase6.py`,
+  `test_integration_offline.py`, `test_reconnect.py`). More information can be found in `satviz/README.md`.
   (license: MIT)
 
 * `realtime_backend` : **New** FastAPI + WebSocket relay server that bridges the simulation core

@@ -197,35 +197,36 @@ satviz/
 
 ## 集成测试
 
-完整集成测试位于 `hypatia-master/integration_tests/`:
+v3 测试套件位于 `hypatia-master/satviz/`（固定种子、可复现，取代 v2 的 `integration_tests/`）：
 
 ```bash
-# 1. 启动后端
-PYTHONPATH=/path/to/hypatia-master:/path/to/realtime_backend \
-  python -m realtime_backend.run --port 8000
-
-# 2. 协议级别测试 (23项测试)
-cd /path/to/hypatia-master
-PYTHONPATH=/path/to/hypatia-master:/path/to/realtime_backend \
-  python integration_tests/test_realtime_integration.py
-
-# 3. 端到端实时测试 (demo_sim_core + backend + client)
-PYTHONPATH=/path/to/hypatia-master:/path/to/realtime_backend \
-  python integration_tests/test_live_demo.py
+cd hypatia-master/satviz
+python test_packet_sim.py            # DES 单元校验：轻载时延对账、拥塞排队/丢包
+python test_phase3.py                # 切换丢包尖峰对账、QoS 严格优先
+python test_phase6.py                # 守恒/吞吐/M-D-1 对账 + 长时与背压压测（--fast 跳过两个长时测试）
+python test_integration_offline.py   # 全管线离线集成（真实 DemoSimCore，无需后端）
+python test_reconnect.py             # 断线重连健壮性（自动起停 backend + sim_core 子进程）
 ```
 
 测试覆盖：
-- WebSocket 连接管理
-- simulation_init 消息广播
-- state_update 实时推送 (验证 10 Hz 频率)
+- WebSocket 连接管理、断线重连（前端指数退避 + 后端 init 重放 + 核心自动重连）
+- simulation_init 消息广播与重放
+- state_update 实时推送
 - 命令转发 (play/pause/stop/reset/speed/timeline/metrics/filter)
-- 多客户端同时接收
-- 前端文件完整性检查
-- demo_sim_core 模块兼容性
+- 包级指标对账（时延/吞吐 vs 理论值、包守恒、M/D/1 排队）与长时压测
+- 详见 `docs/phase6-validation.md`
 
 ---
 
 ## 版本历史
+
+### v3.0 (Packet-Level)
+- 包级仿真：指标全部由自研 DES (`packet_sim.py`) 中真实数据包涌现
+- v3 极简悬浮 UI：图层/统计/详情面板 + 底部播放条
+- 墙钟位置插值（5Hz 推送平滑为逐帧连续运动）
+- 链路指标着色（吞吐/队列/时延/丢包）+ 时序图表面板 + 沿链路包流动动画
+- 切换丢包、分域 QoS（UAV 高优先 / 船舶尽力）
+- 阶段 6 校验加固：理论对账 + 长时压测 + 三层断线自愈
 
 ### v2.0 (Enhanced)
 - 新增实时交互模式 (WebSocket + 10 Hz 状态更新)

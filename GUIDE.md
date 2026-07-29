@@ -397,7 +397,12 @@ hypatia-enhanced/                          # 项目根目录
 │   │   ├── README.md                      # 可视化说明
 │   │   ├── FRONTEND_README.md             # 前端详细文档
 │   │   ├── demo_sim_core.py               # 演示仿真核心 ★
-│   │   ├── test_constellation.py          # 星座测试脚本
+│   │   ├── packet_sim.py                  # 包级离散事件仿真引擎 ★
+│   │   ├── test_packet_sim.py             # DES 单元校验（时延/拥塞对账）
+│   │   ├── test_phase3.py                 # 切换丢包 / QoS 测试
+│   │   ├── test_phase6.py                 # 守恒/吞吐/M-D-1 对账 + 压测
+│   │   ├── test_integration_offline.py    # 全管线离线集成测试
+│   │   ├── test_reconnect.py              # 断线重连健壮性测试
 │   │   ├── static_html/
 │   │   │   ├── index.html                 # 主前端页面 ★
 │   │   │   └── wstest.html               # WebSocket 测试页
