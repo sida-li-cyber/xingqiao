@@ -68,6 +68,34 @@ class UIController {
         // Metrics selection
         document.getElementById('metricsSelect').addEventListener('change', (e) => this.selectMetrics(e.target.value));
 
+        // Type visibility toggles — nodes
+        document.getElementById('toggleSatellite').addEventListener('change', (e) => {
+            this.cesium.setNodeTypeVisibility('satellite', e.target.checked);
+        });
+        document.getElementById('toggleUav').addEventListener('change', (e) => {
+            this.cesium.setNodeTypeVisibility('uav', e.target.checked);
+        });
+        document.getElementById('toggleShip').addEventListener('change', (e) => {
+            this.cesium.setNodeTypeVisibility('ship', e.target.checked);
+        });
+        document.getElementById('toggleGroundStation').addEventListener('change', (e) => {
+            this.cesium.setNodeTypeVisibility('ground_station', e.target.checked);
+        });
+
+        // Type visibility toggles — links
+        document.getElementById('toggleISL').addEventListener('change', (e) => {
+            this.cesium.setLinkTypeVisibility('isl', e.target.checked);
+        });
+        document.getElementById('toggleGSL').addEventListener('change', (e) => {
+            this.cesium.setLinkTypeVisibility('gsl', e.target.checked);
+        });
+        document.getElementById('toggleSUL').addEventListener('change', (e) => {
+            this.cesium.setLinkTypeVisibility('sul', e.target.checked);
+        });
+        document.getElementById('toggleSSL').addEventListener('change', (e) => {
+            this.cesium.setLinkTypeVisibility('ssl', e.target.checked);
+        });
+
         // Scenario selection
         document.getElementById('scenarioSelect').addEventListener('change', (e) => this.selectScenario(e.target.value));
 
@@ -480,7 +508,17 @@ class UIController {
      */
     applyFilters() {
         this.cesium.setSatelliteFilter(Array.from(this.selectedSatellites));
-        this.cesium.setStationFilter(Array.from(this.selectedStations));
+
+        // Split station-filter selections by node type
+        const gs = [], uavs = [], ships = [];
+        for (const id of this.selectedStations) {
+            if (id.startsWith('UAV-')) uavs.push(id);
+            else if (id.startsWith('Ship-')) ships.push(id);
+            else gs.push(id);
+        }
+        this.cesium.setNodeFilter('ground_station', gs);
+        this.cesium.setNodeFilter('uav', uavs);
+        this.cesium.setNodeFilter('ship', ships);
 
         this.ws.sendFilterCommand(
             Array.from(this.selectedSatellites),
@@ -582,6 +620,41 @@ class UIController {
     }
 
     /**
+     * Populate node filter lists from v2 simulation_init nodes.
+     * @param {object} nodesByType - {satellite: [...], uav: [...], ship: [...], ground_station: [...]}
+     */
+    populateNodeFilters(nodesByType) {
+        // Satellites → satellite filter list
+        if (nodesByType.satellite) {
+            this.populateSatelliteFilter(nodesByType.satellite);
+        }
+
+        // Ground stations + UAVs + Ships → station filter list
+        const others = [
+            ...(nodesByType.ground_station || []),
+            ...(nodesByType.uav || []),
+            ...(nodesByType.ship || []),
+        ];
+        if (others.length > 0) {
+            this.populateStationFilter(others);
+        }
+    }
+
+    /**
+     * Update metrics summary display (v2 state_update.metrics_summary).
+     */
+    updateMetricsSummary(summary) {
+        const el = document.getElementById('metricsSummary');
+        if (el) {
+            el.textContent =
+                `Active links: ${summary.active_links} | ` +
+                `Nodes: ${summary.total_nodes} | ` +
+                `Avg util: ${(summary.avg_utilization * 100).toFixed(1)}% | ` +
+                `Max latency: ${summary.max_latency_ms}ms`;
+        }
+    }
+
+    /**
      * Update connection status indicator
      */
     updateConnectionStatus(isConnected) {
@@ -604,7 +677,9 @@ class UIController {
      */
     updateStatistics(stats) {
         document.getElementById('satCount').textContent = stats.satellites || 0;
-        document.getElementById('staCount').textContent = stats.stations || 0;
+        document.getElementById('uavCount').textContent = stats.uavs || 0;
+        document.getElementById('shipCount').textContent = stats.ships || 0;
+        document.getElementById('staCount').textContent = stats.ground_stations || 0;
         document.getElementById('linkCount').textContent = stats.links || 0;
         document.getElementById('fpsCounter').textContent = (stats.fps || 0) + ' FPS';
     }

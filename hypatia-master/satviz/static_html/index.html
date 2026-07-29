@@ -374,6 +374,35 @@
             margin: 0 auto 2px;
         }
 
+        /* Legend / type visibility */
+        .legend-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 4px 10px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 11.5px;
+            cursor: pointer;
+            color: #ccc;
+        }
+
+        .legend-item input[type="checkbox"] {
+            margin: 0;
+            cursor: pointer;
+        }
+
+        .swatch {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
+
         /* Responsive */
         @media (max-width: 800px) {
             #controlPanel {
@@ -389,7 +418,7 @@
 
     <!-- Info banner (non-interactive) -->
     <div id="infoBanner">
-        Satellite Network Visualization | CesiumJS 1.141
+        空天海多域网络可视化 | CesiumJS 1.141 | Protocol v2
     </div>
 
     <!-- Metrics color legend bar -->
@@ -466,6 +495,48 @@
                 </select>
             </div>
 
+            <!-- Type Visibility & Legend -->
+            <div class="control-section">
+                <label class="control-label">Type Visibility</label>
+                <div class="legend-grid">
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleSatellite" checked>
+                        <span class="swatch" style="background:#1E90FF;"></span> Satellite
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleUav" checked>
+                        <span class="swatch" style="background:#32CD32;"></span> UAV
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleShip" checked>
+                        <span class="swatch" style="background:#FFA500;"></span> Ship
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleGroundStation" checked>
+                        <span class="swatch" style="background:#FF4500;"></span> Ground Station
+                    </label>
+                </div>
+                <label class="control-label" style="margin-top:8px;">Link Types</label>
+                <div class="legend-grid">
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleISL" checked>
+                        <span class="swatch" style="background:#4FC3F7;"></span> ISL 星间
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleGSL" checked>
+                        <span class="swatch" style="background:#FF8A65;"></span> GSL 地面
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleSUL" checked>
+                        <span class="swatch" style="background:#81C784;"></span> SUL 无人机
+                    </label>
+                    <label class="legend-item">
+                        <input type="checkbox" id="toggleSSL" checked>
+                        <span class="swatch" style="background:#FFB74D;"></span> SSL 船舶
+                    </label>
+                </div>
+            </div>
+
             <!-- Constellation Selection -->
             <div class="control-section">
                 <label class="control-label">Constellation</label>
@@ -506,10 +577,10 @@
                 </div>
             </div>
 
-            <!-- Ground Station Filter -->
+            <!-- Ground Station / UAV / Ship Filter -->
             <div class="control-section">
-                <label class="control-label">Ground Station Filter</label>
-                <input type="text" id="stationSearch" placeholder="Search station...">
+                <label class="control-label">Node Filter (GS / UAV / Ship)</label>
+                <input type="text" id="stationSearch" placeholder="Search node...">
                 <div class="filter-list" id="stationFilterList">
                     <div style="color: #888; text-align: center; padding: 10px;">Waiting for data...</div>
                 </div>
@@ -527,6 +598,14 @@
                     <span class="info-value" id="satCount">0</span>
                 </div>
                 <div class="info-row">
+                    <span class="info-label">UAVs:</span>
+                    <span class="info-value" id="uavCount">0</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">Ships:</span>
+                    <span class="info-value" id="shipCount">0</span>
+                </div>
+                <div class="info-row">
                     <span class="info-label">Ground Stations:</span>
                     <span class="info-value" id="staCount">0</span>
                 </div>
@@ -538,6 +617,7 @@
                     <span class="info-label">FPS:</span>
                     <span class="info-value" id="fpsCounter">0 FPS</span>
                 </div>
+                <div style="font-size: 11px; color: #aaa; margin-top: 6px;" id="metricsSummary">Waiting for data...</div>
             </div>
         </div>
 
@@ -579,9 +659,9 @@
     </div>
 
     <!-- JavaScript Modules -->
-    <script src="../js/websocket.js?v=d4e8c2a1"></script>
-    <script src="../js/cesium-manager.js?v=b5a4c3d2"></script>
-    <script src="../js/ui-controller.js?v=e1f2a3b4"></script>
-    <script src="../js/app.js?v=c9d0e1f2"></script>
+    <script src="../js/websocket.js?v=2a0"></script>
+    <script src="../js/cesium-manager.js?v=2a0"></script>
+    <script src="../js/ui-controller.js?v=2a0"></script>
+    <script src="../js/app.js?v=2a0"></script>
 </body>
 </html>
