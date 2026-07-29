@@ -41,13 +41,20 @@ EARTH_RADIUS_KM = 6371.0
 EARTH_MU = 398600.4418  # km^3/s^2
 EARTH_ROTATION_RATE = 360.0 / 86400.0  # deg/s
 
-# Link range thresholds (km) with hysteresis
+# GSL: distance thresholds (km) with hysteresis
 GSL_CONNECT_RANGE = 2000.0
 GSL_DISCONNECT_RANGE = 2200.0
-SUL_CONNECT_RANGE = 1500.0
-SUL_DISCONNECT_RANGE = 1700.0
-SSL_CONNECT_RANGE = 1800.0
-SSL_DISCONNECT_RANGE = 2000.0
+
+# SUL / SSL: each UAV / ship uplinks to its K nearest *visible* satellites.
+# A satellite is "visible" when it sits above a minimum elevation angle
+# (real line-of-sight mask), so links are geometrically plausible and
+# hand over naturally as the constellation sweeps overhead. This guarantees
+# every UAV / ship always has at least one live uplink, unlike a fixed
+# distance threshold which the sparse 72-sat constellation rarely satisfies.
+SUL_MAX_LINKS = 2        # uplinks per UAV
+SSL_MAX_LINKS = 2        # uplinks per ship
+SUL_MIN_ELEV_DEG = 5.0   # minimum satellite elevation for a usable uplink
+SSL_MIN_ELEV_DEG = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +74,37 @@ def haversine_km(lat1, lon1, lat2, lon2):
 def normalize_lon(lon):
     """Normalize longitude to [-180, 180]."""
     return ((lon + 180.0) % 360.0) - 180.0
+
+
+def satellite_elevation_deg(obs_lat, obs_lon, sat_lat, sat_lon, sat_alt_km):
+    """Elevation angle (deg) of a satellite as seen from an observer.
+
+    Uses the standard single-shell visibility relation:
+        tan(el) = (cos λ − ρ) / sin λ
+    where λ is the great-circle (central) angle between observer and the
+    satellite sub-point, and ρ = Re / (Re + h).
+    """
+    d = haversine_km(obs_lat, obs_lon, sat_lat, sat_lon)
+    lam = d / EARTH_RADIUS_KM  # central angle in radians
+    rho = EARTH_RADIUS_KM / (EARTH_RADIUS_KM + sat_alt_km)
+    if abs(math.sin(lam)) < 1e-9:
+        return 90.0  # satellite directly overhead
+    return math.degrees(math.atan2(math.cos(lam) - rho, math.sin(lam)))
+
+
+def visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg):
+    """Return [(sat_id, ground_dist_km)] for satellites above min_elev_deg,
+    sorted nearest-first."""
+    out = []
+    for sat_id, sp in sat_pos.items():
+        sat_alt_km = sp.get("alt", 550000.0) / 1000.0
+        el = satellite_elevation_deg(obs_lat, obs_lon,
+                                     sp["lat"], sp["lon"], sat_alt_km)
+        if el >= min_elev_deg:
+            out.append((sat_id,
+                        haversine_km(obs_lat, obs_lon, sp["lat"], sp["lon"])))
+    out.sort(key=lambda x: x[1])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +433,36 @@ class DemoSimCore:
     # Dynamic link computation
     # ------------------------------------------------------------------
 
+    def _topk_uplinks(self, active_set, obs_id, obs_lat, obs_lon,
+                      sat_pos, k, min_elev_deg):
+        """Uplink set for one UAV/ship: its K nearest visible satellites.
+
+        Hysteresis: currently-active links are kept as long as the satellite
+        is still above the elevation mask, so links don't flicker when two
+        satellites are nearly equidistant. Falls back to the single nearest
+        satellite to guarantee at least one live uplink at all times.
+        """
+        vis = visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg)
+
+        result = set()
+        # 1) keep active links that are still visible (hysteresis)
+        for sat_id, _d in vis:
+            if (sat_id, obs_id) in active_set and len(result) < k:
+                result.add((sat_id, obs_id))
+        # 2) fill up to K with the nearest visible satellites
+        for sat_id, _d in vis:
+            if len(result) >= k:
+                break
+            result.add((sat_id, obs_id))
+        # 3) guarantee at least one link even if nothing is above the mask
+        if not result and sat_pos:
+            nearest = min(
+                sat_pos.items(),
+                key=lambda kv: haversine_km(obs_lat, obs_lon,
+                                            kv[1]["lat"], kv[1]["lon"]))
+            result.add((nearest[0], obs_id))
+        return result
+
     def _update_dynamic_links(self, positions):
         """Compute GSL/SUL/SSL with hysteresis."""
         sat_pos = {sid: p for sid, p in positions.items() if sid.startswith("Sat-")}
@@ -416,32 +484,20 @@ class DemoSimCore:
                         new_gsl.add(pair)
         self._active_gsl = new_gsl
 
-        # SUL: satellite <-> UAV
+        # SUL: each UAV uplinks to its K nearest visible satellites
         new_sul = set()
         for uav_id, up in uav_pos.items():
-            for sat_id, sp in sat_pos.items():
-                d = haversine_km(up["lat"], up["lon"], sp["lat"], sp["lon"])
-                pair = (sat_id, uav_id)
-                if pair in self._active_sul:
-                    if d < SUL_DISCONNECT_RANGE:
-                        new_sul.add(pair)
-                else:
-                    if d < SUL_CONNECT_RANGE:
-                        new_sul.add(pair)
+            new_sul |= self._topk_uplinks(
+                self._active_sul, uav_id, up["lat"], up["lon"],
+                sat_pos, SUL_MAX_LINKS, SUL_MIN_ELEV_DEG)
         self._active_sul = new_sul
 
-        # SSL: satellite <-> Ship
+        # SSL: each ship uplinks to its K nearest visible satellites
         new_ssl = set()
         for ship_id, shp in ship_pos.items():
-            for sat_id, sp in sat_pos.items():
-                d = haversine_km(shp["lat"], shp["lon"], sp["lat"], sp["lon"])
-                pair = (sat_id, ship_id)
-                if pair in self._active_ssl:
-                    if d < SSL_DISCONNECT_RANGE:
-                        new_ssl.add(pair)
-                else:
-                    if d < SSL_CONNECT_RANGE:
-                        new_ssl.add(pair)
+            new_ssl |= self._topk_uplinks(
+                self._active_ssl, ship_id, shp["lat"], shp["lon"],
+                sat_pos, SSL_MAX_LINKS, SSL_MIN_ELEV_DEG)
         self._active_ssl = new_ssl
 
     # ------------------------------------------------------------------
