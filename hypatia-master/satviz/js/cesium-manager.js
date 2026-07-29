@@ -156,6 +156,11 @@ class CesiumManager {
                 duration: 2,
             });
 
+            // Packet-flow animation layer (cosmetic, wall-time driven).
+            if (typeof PacketFlowManager !== 'undefined') {
+                this.packetFlow = new PacketFlowManager(this);
+            }
+
             this.setupEventHandlers();
             this.startFpsCounter();
 
@@ -174,7 +179,16 @@ class CesiumManager {
         handler.setInputAction((click) => {
             const picked = this.scene.pick(click.position);
             if (picked && picked.id) {
-                this.selectEntity(picked.id);
+                // Packet entities are decorative — never select them. Treat a
+                // packet hit as empty space so it doesn't block link/node picks.
+                const ptype = picked.id.properties && picked.id.properties.type
+                    ? picked.id.properties.type.getValue()
+                    : null;
+                if (ptype === 'packet') {
+                    this.selectEntity(null);
+                } else {
+                    this.selectEntity(picked.id);
+                }
             } else {
                 this.selectEntity(null);
             }
@@ -678,6 +692,9 @@ class CesiumManager {
             this._linkColorCache.delete(linkId);
             this.stats.links = Math.max(0, this.stats.links - 1);
         }
+        if (this.packetFlow) {
+            this.packetFlow.dropLink(linkId);
+        }
     }
 
     /**
@@ -697,6 +714,11 @@ class CesiumManager {
         // Add or update incoming links
         for (const [linkId, data] of Object.entries(linksData)) {
             this.addOrUpdateLink(linkId, data.source, data.target, data);
+        }
+
+        // Reconcile the packet-flow animation layer with the new link set.
+        if (this.packetFlow) {
+            this.packetFlow.sync();
         }
     }
 
@@ -869,6 +891,16 @@ class CesiumManager {
         }
     }
 
+    /**
+     * Toggle the packet-flow animation layer on/off (UI checkbox).
+     * @param {boolean} on
+     */
+    setPacketFlow(on) {
+        if (this.packetFlow) {
+            this.packetFlow.setEnabled(on);
+        }
+    }
+
     // ======================================================================
     // Route Highlighting
     // ======================================================================
@@ -988,6 +1020,9 @@ class CesiumManager {
         this.nodeInterp.clear();
         this._highlightedLinks.clear();
         this._linkColorCache.clear();
+        if (this.packetFlow) {
+            this.packetFlow.clear();
+        }
         this.selectedEntity = null;
         this.stats = {
             satellites: 0,

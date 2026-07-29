@@ -141,7 +141,7 @@ Hypatia 原生框架基于 ns-3（C++）做包级仿真，但存在以下问题�
 - ✅ 链路按真实吞吐 / 队列深度着色（复用现有颜色映射，换成真数据）。
 - ✅ 新增时序图表面板：吞吐 / 时延 / 丢包随仿真时间变化的曲线。
 - ✅ 真实路由路径高亮（阶段 2 已实现，由实际转发路径 `payload.routing` 驱动）。
-- ⬜ 可选增强：沿链路动画展示数据包流动（暂缓，非核心）。
+- ✅ 可选增强：沿链路动画展示数据包流动（已完成，2026-07-29）。
 
 **产出 / 验收**：点击任意链路 / 节点，看到的是随时间演化的真实曲线，而非静态数字。
 
@@ -149,6 +149,7 @@ Hypatia 原生框架基于 ns-3（C++）做包级仿真，但存在以下问题�
 > - **链路着色（真数据驱动）**：`cesium-manager.js` 新增 `_linkMetricValue(props, mode)`，把每条链路的实时指标归一化到 0..1（`bandwidth`=利用率、`queue`=队列深度/容量、`latency`=时延/50ms、`loss_rate`=丢包率×100），再经既有 `_getGradientColor` 绿→黄→红渐变着色；量化到 0.05 档避免 5Hz 逐 tick 重建材质。`addOrUpdateLink` 创建/更新分支、`setMetricsMode`、`_restoreEntityStyle`、`clearRouteHighlights` 统一改传完整链路属性快照，使着色随真实吞吐/队列逐 tick 演化。图层面板新增「链路着色」下拉（按类型/吞吐利用率/队列深度/时延/丢包率）切换 `metricsMode`。
 > - **时序图表面板**：新增零依赖 `js/chart.js`（`TimeSeriesChart`，Canvas 2D，自动量程 + 滚动点缓冲 + ~10fps 限频重绘 + 仿真重启/回拉自动清空）。`ui-controller.js` 实例化吞吐(Mbps)/端到端时延(ms)/丢包(pkt/s) 三条曲线，`pushCharts(timestamp, summary)` 以 ~2Hz 从 `metrics_summary` 取数——丢包用累计 `pkts_dropped` 的差分除以仿真时间差得瞬时速率；`app.js` 在每次 state_update 喂数、simulation_init 时 `resetCharts()` 清空。左下新增可折叠「时序指标」玻璃面板（index.html）。
 > - **验收对账**：浏览器实测时序面板实时涌现（吞吐 2.06 Mbps、时延 79ms、丢包 1 pkt/s 曲线随时间推进）；着色下拉切换后链路按对应指标渐变着色。后端零改动。cache-bust v=3f0。
+> - **沿链路包流动动画（可选增强，2026-07-29）**：新增零依赖 `js/packet-flow.js`（`PacketFlowManager`）——为每条活跃链路生成 1–4 个白色「数据包」点实体（数量随利用率提升），沿链路从 source 端向 target 端循环流动。包位置用 `CallbackProperty` 在**每个渲染帧**对两端节点的实时插值位置（复用阶段 4 的 `_sampleNode`）做 `Cartesian3.lerp`，按墙钟时间推进相位，故与仿真倍速/暂停无关、任意时刻都平滑流动；流速随利用率 1200ms→500ms 加快。全局上限 250 个包（超额按比例缩减），链路移除/`clearAll` 时同步清理；拾取守卫使点击包等同于点空白（不干扰链路/节点选择）。**刻意不触碰链路材质**，与既有颜色缓存/指标渐变逻辑零耦合。图层面板新增「动画 → 包流动动画」开关（默认开），`cesium-manager.setPacketFlow()` 驱动。**验收对账**：注入临时脚本读 `packetFlow._all.length` 得 **n=211 / byLink=211 / enabled=true**，与 211 条活跃链路精确一致（轻载每链 1 包），帧率稳定 120 FPS。后端零改动。cache-bust v=3g0。
 
 ---
 

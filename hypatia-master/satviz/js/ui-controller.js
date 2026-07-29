@@ -92,6 +92,14 @@ class UIController {
             });
         }
 
+        // Packet-flow animation toggle
+        const packetFlowToggle = document.getElementById('packetFlowToggle');
+        if (packetFlowToggle) {
+            packetFlowToggle.addEventListener('change', (e) => {
+                this.cesium.setPacketFlow(e.target.checked);
+            });
+        }
+
         // Time-series charts (throughput / latency / loss vs sim time)
         if (typeof TimeSeriesChart !== 'undefined') {
             this.charts = {
