@@ -1123,24 +1123,24 @@ class DemoSimCore:
 
         if action == "play":
             self.is_playing = True
-            print(f"  ▶ Play at t={self.sim_time:.1f}s")
+            print(f"  [play] at t={self.sim_time:.1f}s")
         elif action == "pause":
             self.is_playing = False
-            print(f"  ⏸ Pause at t={self.sim_time:.1f}s")
+            print(f"  [pause] at t={self.sim_time:.1f}s")
         elif action == "stop":
             self.is_playing = False
             self.sim_time = 0.0
-            print("  ⏹ Stopped, time reset to 0")
+            print("  [stop] time reset to 0")
         elif action == "reset":
             self.sim_time = 0.0
-            print("  ↻ Reset, time reset to 0")
+            print("  [reset] time reset to 0")
         elif action == "speed":
             self.speed = max(0.1, min(10.0, float(params.get("multiplier", 1.0))))
-            print(f"  Speed set to {self.speed}x")
+            print(f"  [speed] {self.speed}x")
         elif action == "timeline":
             target = float(params.get("timestamp", 0))
             self.sim_time = max(0, min(self.duration, target))
-            print(f"  ⏩ Jumped to t={self.sim_time:.1f}s")
+            print(f"  [timeline] jumped to t={self.sim_time:.1f}s")
         elif action == "metrics":
             self.metrics_mode = params.get("type", "bandwidth")
             print(f"  Metrics mode: {self.metrics_mode}")
@@ -1160,6 +1160,14 @@ class DemoSimCore:
             # chunks routed src -> dst with timeout-driven ARQ.
             file_id = params.get("file_id")
             if file_id:
+                # Keep the engine running long enough for the transfer to
+                # finish: a file uploaded after the sim auto-paused at its
+                # duration would otherwise never inject a single chunk.
+                if self.sim_time >= self.duration - 5.0:
+                    self.duration = self.sim_time + 120.0
+                if not self.is_playing:
+                    self.is_playing = True
+                    print("  [file] resumed playback for transfer")
                 self.engine.start_file(
                     file_id=file_id,
                     name=params.get("name", file_id),

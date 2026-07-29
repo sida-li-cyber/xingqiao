@@ -302,9 +302,14 @@ class PacketEngine:
         self._last_route_refresh = -_INF
         self._topo_dirty = True
         # Milestone A: a time discontinuity abandons in-flight file chunks
-        # (their FGEN/FRET events just vanished with the heap).
+        # (their FGEN/FRET events just vanished with the heap). Notify the
+        # backend data plane so an interrupted transfer is marked cancelled
+        # rather than left stuck in TRANSFERRING forever.
+        for ft in self.files.values():
+            if ft.state == FT_TRANSFERRING:
+                self.file_events.append(
+                    {"type": "file_cancelled", "file_id": ft.file_id})
         self.files = {}
-        self.file_events = []
         self._reset_counters()
         for lk in self.links.values():
             lk.bytes_tx = 0
