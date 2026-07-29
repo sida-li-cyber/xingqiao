@@ -267,6 +267,12 @@ class CesiumManager {
             latency_ms: get('latency_ms') || 0,
             loss_rate: get('loss_rate') || 0,
             is_active: get('is_active') !== false,
+            // Protocol v3 packet-level telemetry
+            tx_bps: get('tx_bps') || 0,
+            capacity_bps: get('capacity_bps') || 0,
+            queue_depth: get('queue_depth') || 0,
+            queue_capacity: get('queue_capacity') || 0,
+            propagation_ms: get('propagation_ms') || 0,
         };
     }
 
@@ -532,6 +538,12 @@ class CesiumManager {
                         latency_ms: properties.latency_ms || 0,
                         loss_rate: properties.loss_rate || 0,
                         is_active: properties.is_active !== false,
+                        // Protocol v3 packet-level telemetry
+                        tx_bps: properties.tx_bps || 0,
+                        capacity_bps: properties.capacity_bps || 0,
+                        queue_depth: properties.queue_depth || 0,
+                        queue_capacity: properties.queue_capacity || 0,
+                        propagation_ms: properties.propagation_ms || 0,
                     },
                 });
 
@@ -561,6 +573,12 @@ class CesiumManager {
                 link.properties.latency_ms = properties.latency_ms || 0;
                 link.properties.loss_rate = properties.loss_rate || 0;
                 link.properties.is_active = properties.is_active !== false;
+                // Protocol v3 packet-level telemetry
+                link.properties.tx_bps = properties.tx_bps || 0;
+                link.properties.capacity_bps = properties.capacity_bps || 0;
+                link.properties.queue_depth = properties.queue_depth || 0;
+                link.properties.queue_capacity = properties.queue_capacity || 0;
+                link.properties.propagation_ms = properties.propagation_ms || 0;
             }
 
             return this.entities.links.get(linkId);

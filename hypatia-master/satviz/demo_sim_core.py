@@ -56,6 +56,20 @@ SSL_MAX_LINKS = 2        # uplinks per ship
 SUL_MIN_ELEV_DEG = 5.0   # minimum satellite elevation for a usable uplink
 SSL_MIN_ELEV_DEG = 5.0
 
+# --- Protocol v3: packet-level telemetry baselines (Phase 1 placeholders) ---
+# Phase 1 emits these as constants / geometry-derived values; Phase 2 replaces
+# them with measurements emerging from the discrete-event packet simulator.
+SPEED_OF_LIGHT_KM_S = 299792.458
+
+LINK_CAPACITY_BPS = {
+    "isl": 1e10,   # 10 Gbps inter-satellite laser link
+    "gsl": 1e9,    # 1 Gbps feeder / user link
+    "sul": 5e8,    # 500 Mbps UAV uplink
+    "ssl": 5e8,    # 500 Mbps ship uplink
+}
+PACKET_SIZE_BYTES = 1500       # single packet size
+PACKET_QUEUE_CAPACITY = 200    # per-output-port queue depth (packets)
+
 
 # ---------------------------------------------------------------------------
 # Utility
@@ -105,6 +119,26 @@ def visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg):
                         haversine_km(obs_lat, obs_lon, sp["lat"], sp["lon"])))
     out.sort(key=lambda x: x[1])
     return out
+
+
+def slant_range_km(lat1, lon1, alt1_m, lat2, lon2, alt2_m):
+    """3D straight-line distance (km) between two lat/lon/alt points.
+
+    Law of cosines in the plane containing both points and the Earth's
+    centre: d = sqrt(r1² + r2² − 2·r1·r2·cos λ), where λ is the central
+    angle (ground distance / Re) and rᵢ = Re + altᵢ.
+    """
+    ground = haversine_km(lat1, lon1, lat2, lon2)
+    lam = ground / EARTH_RADIUS_KM  # central angle (rad)
+    r1 = EARTH_RADIUS_KM + alt1_m / 1000.0
+    r2 = EARTH_RADIUS_KM + alt2_m / 1000.0
+    return math.sqrt(r1 * r1 + r2 * r2 - 2.0 * r1 * r2 * math.cos(lam))
+
+
+def propagation_delay_ms(lat1, lon1, alt1_m, lat2, lon2, alt2_m):
+    """Geometric propagation delay (ms) = slant range / speed of light."""
+    return slant_range_km(lat1, lon1, alt1_m, lat2, lon2, alt2_m) \
+        / SPEED_OF_LIGHT_KM_S * 1000.0
 
 
 # ---------------------------------------------------------------------------
@@ -501,11 +535,105 @@ class DemoSimCore:
         self._active_ssl = new_ssl
 
     # ------------------------------------------------------------------
+    # Protocol v3: packet-level telemetry helpers (Phase 1 placeholders)
+    # ------------------------------------------------------------------
+
+    def _node_position(self, positions, node_id):
+        """Resolve any node id (dynamic or ground station) to (lat, lon, alt_m)."""
+        if node_id in positions:
+            p = positions[node_id]
+            return p["lat"], p["lon"], p.get("alt", 0.0)
+        if node_id in self.ground_stations:
+            lat, lon, _label = self.ground_stations[node_id]
+            return lat, lon, 0.0
+        return None
+
+    def _packet_fields(self, positions, src_id, tgt_id, util, link_type):
+        """Placeholder packet-level telemetry for one link (Phase 1).
+
+        propagation_ms is already real (geometric); the rest are derived
+        from the simulated utilization and will be replaced by DES
+        measurements in Phase 2.
+        """
+        capacity = LINK_CAPACITY_BPS[link_type]
+        sp = self._node_position(positions, src_id)
+        tp = self._node_position(positions, tgt_id)
+        if sp and tp:
+            prop_ms = propagation_delay_ms(sp[0], sp[1], sp[2],
+                                           tp[0], tp[1], tp[2])
+        else:
+            prop_ms = 0.0
+        return {
+            "tx_bps": round(util * capacity, 1),
+            "capacity_bps": capacity,
+            "queue_depth": int(round(util * PACKET_QUEUE_CAPACITY * 0.3)),
+            "queue_capacity": PACKET_QUEUE_CAPACITY,
+            "propagation_ms": round(prop_ms, 2),
+        }
+
+    def _build_node_metrics(self):
+        """Placeholder per-node packet counters (Phase 1).
+
+        UAVs/ships act as traffic sources, satellites as forwarders, ground
+        stations as sinks. All counters are deterministic functions of
+        sim_time so the detail panel feels alive; Phase 2 replaces these
+        with real DES counters.
+        """
+        nm = {}
+        t = self.sim_time
+
+        for uav in self.uavs:
+            sent = int(t * 10 + hash(uav.id) % 100)
+            nm[uav.id] = {
+                "pkts_sent": sent,
+                "pkts_recv": int(sent * 0.25),
+                "pkts_fwd": 0,
+                "pkts_dropped": int(sent * 0.002),
+                "e2e_latency_ms": round(20.0 + 5.0 * math.sin(t * 0.1 + hash(uav.id) % 10), 1),
+                "jitter_ms": round(1.5 + 0.5 * math.sin(t * 0.2 + hash(uav.id) % 7), 2),
+            }
+
+        for ship in self.ships:
+            sent = int(t * 6 + hash(ship.id) % 100)
+            nm[ship.id] = {
+                "pkts_sent": sent,
+                "pkts_recv": int(sent * 0.2),
+                "pkts_fwd": 0,
+                "pkts_dropped": int(sent * 0.003),
+                "e2e_latency_ms": round(25.0 + 6.0 * math.sin(t * 0.08 + hash(ship.id) % 10), 1),
+                "jitter_ms": round(2.0 + 0.6 * math.sin(t * 0.15 + hash(ship.id) % 7), 2),
+            }
+
+        for sat in self.satellites:
+            fwd = int(t * 120 + hash(sat.id) % 500)
+            nm[sat.id] = {
+                "pkts_sent": 0,
+                "pkts_recv": 0,
+                "pkts_fwd": fwd,
+                "pkts_dropped": int(fwd * 0.001),
+                "e2e_latency_ms": 0.0,
+                "jitter_ms": 0.0,
+            }
+
+        for name in self.ground_stations:
+            recv = int(t * 80 + hash(name) % 300)
+            nm[name] = {
+                "pkts_sent": 0,
+                "pkts_recv": recv,
+                "pkts_fwd": 0,
+                "pkts_dropped": 0,
+                "e2e_latency_ms": round(18.0 + 4.0 * math.sin(t * 0.09 + hash(name) % 10), 1),
+                "jitter_ms": round(1.2 + 0.4 * math.sin(t * 0.18 + hash(name) % 7), 2),
+            }
+
+        return nm
+
+    # ------------------------------------------------------------------
     # Message builders
     # ------------------------------------------------------------------
 
     def get_init_message(self):
-        """Build v2 simulation_init."""
+        """Build v3 simulation_init (v2 fields + packet-level capacities)."""
         nodes = {}
 
         # Satellites
@@ -553,21 +681,31 @@ class DemoSimCore:
         return {
             "message_type": "simulation_init",
             "payload": {
-                "version": "2.0",
+                "version": "3.0",
                 "duration": self.duration,
                 "update_rate_hz": 5,
                 "nodes": nodes,
                 "link_types": {
-                    "isl": {"label": "星间链路", "color": "#4FC3F7"},
-                    "gsl": {"label": "地面-卫星链路", "color": "#FF8A65"},
-                    "sul": {"label": "卫星-无人机链路", "color": "#81C784"},
-                    "ssl": {"label": "卫星-船舶链路", "color": "#FFB74D"},
+                    "isl": {"label": "星间链路", "color": "#4FC3F7",
+                            "capacity_bps": LINK_CAPACITY_BPS["isl"]},
+                    "gsl": {"label": "地面-卫星链路", "color": "#FF8A65",
+                            "capacity_bps": LINK_CAPACITY_BPS["gsl"]},
+                    "sul": {"label": "卫星-无人机链路", "color": "#81C784",
+                            "capacity_bps": LINK_CAPACITY_BPS["sul"]},
+                    "ssl": {"label": "卫星-船舶链路", "color": "#FFB74D",
+                            "capacity_bps": LINK_CAPACITY_BPS["ssl"]},
+                },
+                "packet_model": {
+                    "packet_size_bytes": PACKET_SIZE_BYTES,
+                    "queue_capacity_pkts": PACKET_QUEUE_CAPACITY,
+                    "traffic": "poisson",
+                    "notes": "阶段1为占位配置，阶段2由DES流量模型驱动",
                 },
             },
         }
 
     def get_state_update(self):
-        """Build v2 state_update with all domains."""
+        """Build v3 state_update (v2 fields + packet-level telemetry)."""
         positions = {}
 
         # Satellite positions
@@ -607,6 +745,8 @@ class DemoSimCore:
                 "latency_ms": round(8.0 + 20.0 * util, 1),
                 "loss_rate": 0.0,
             }
+            links[link_id].update(
+                self._packet_fields(positions, src, tgt, util, "isl"))
 
         # GSL
         for gs_name, sat_id in self._active_gsl:
@@ -622,6 +762,8 @@ class DemoSimCore:
                 "latency_ms": round(5.0 + 10.0 * util, 1),
                 "loss_rate": round(max(0, util - 0.6) * 0.005, 4),
             }
+            links[link_id].update(
+                self._packet_fields(positions, gs_name, sat_id, util, "gsl"))
 
         # SUL
         for sat_id, uav_id in self._active_sul:
@@ -637,6 +779,8 @@ class DemoSimCore:
                 "latency_ms": round(6.0 + 12.0 * util, 1),
                 "loss_rate": 0.0,
             }
+            links[link_id].update(
+                self._packet_fields(positions, sat_id, uav_id, util, "sul"))
 
         # SSL
         for sat_id, ship_id in self._active_ssl:
@@ -652,6 +796,8 @@ class DemoSimCore:
                 "latency_ms": round(10.0 + 15.0 * util, 1),
                 "loss_rate": round(max(0, util - 0.7) * 0.008, 4),
             }
+            links[link_id].update(
+                self._packet_fields(positions, sat_id, ship_id, util, "ssl"))
 
         # Routing highlight (cycle through interesting cross-domain paths)
         routing = {}
@@ -678,18 +824,34 @@ class DemoSimCore:
         utils = [lk["bandwidth_utilization"] for lk in links.values() if lk["is_active"]]
         latencies = [lk["latency_ms"] for lk in links.values() if lk["is_active"]]
 
+        # Protocol v3: per-node packet metrics + packet-level aggregates
+        node_metrics = self._build_node_metrics()
+        e2e_vals = [m["e2e_latency_ms"] for m in node_metrics.values()
+                    if m["e2e_latency_ms"] > 0]
+        pkts_in_flight = (sum(lk.get("queue_depth", 0) for lk in links.values()
+                              if lk["is_active"]) + active_count)
+        agg_throughput = sum(lk.get("tx_bps", 0.0) for lk in links.values()
+                             if lk["is_active"])
+
         return {
             "message_type": "state_update",
             "payload": {
                 "timestamp": round(self.sim_time, 2),
                 "positions": positions,
                 "links": links,
+                "node_metrics": node_metrics,
                 "routing": routing,
                 "metrics_summary": {
                     "active_links": active_count,
                     "total_nodes": len(positions) + len(self.ground_stations),
                     "avg_utilization": round(sum(utils) / len(utils), 3) if utils else 0,
                     "max_latency_ms": round(max(latencies), 1) if latencies else 0,
+                    # v3 packet-level aggregates (Phase 1 placeholders)
+                    "pkts_in_flight": pkts_in_flight,
+                    "pkts_delivered": sum(m["pkts_recv"] for m in node_metrics.values()),
+                    "pkts_dropped": sum(m["pkts_dropped"] for m in node_metrics.values()),
+                    "avg_e2e_latency_ms": round(sum(e2e_vals) / len(e2e_vals), 1) if e2e_vals else 0.0,
+                    "aggregate_throughput_bps": round(agg_throughput, 1),
                 },
             },
         }

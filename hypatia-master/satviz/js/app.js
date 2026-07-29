@@ -22,6 +22,8 @@ class SatelliteVisualizationApp {
         this.nodeMetadata = {};
         // Link type definitions from init
         this.linkTypes = {};
+        // Protocol v3: per-node packet telemetry (nodeId -> metrics)
+        this.nodeMetrics = {};
 
         this._wsConnected = false;
     }
@@ -171,6 +173,11 @@ class SatelliteVisualizationApp {
                 this.ui.updateMetricsSummary(payload.metrics_summary);
             }
 
+            // Protocol v3: per-node packet telemetry
+            if (payload.node_metrics) {
+                this.nodeMetrics = payload.node_metrics;
+            }
+
             // Live-refresh the open detail panel (link or node)
             this.refreshDetailPanel();
 
@@ -236,8 +243,14 @@ class SatelliteVisualizationApp {
         if (info.kind === 'link') {
             this.ui.showLinkDetail(info);
         } else if (info.kind === 'node') {
-            this.ui.showNodeDetail(info);
+            this.ui.showNodeDetail(this._withNodeMetrics(info));
         }
+    }
+
+    /** Merge protocol-v3 per-node packet metrics into a node info object. */
+    _withNodeMetrics(info) {
+        const m = this.nodeMetrics[info.nodeId];
+        return m ? Object.assign({}, info, m) : info;
     }
 
     /**
@@ -261,7 +274,7 @@ class SatelliteVisualizationApp {
         } else if (kind === 'node') {
             const data = this.cesium.getNodeData(id);
             if (data) {
-                this.ui.updateNodeDetail(data);
+                this.ui.updateNodeDetail(this._withNodeMetrics(data));
             }
         }
     }

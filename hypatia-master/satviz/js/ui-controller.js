@@ -182,6 +182,15 @@ class UIController {
     // Detail panel (link / node)
     // ==================================================================
 
+    /** Format a bits-per-second value as a readable string (Gbps/Mbps/Kbps). */
+    fmtBps(bps) {
+        const v = Number(bps) || 0;
+        if (v >= 1e9) return (v / 1e9).toFixed(2) + ' Gbps';
+        if (v >= 1e6) return (v / 1e6).toFixed(1) + ' Mbps';
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
+        return v.toFixed(0) + ' bps';
+    }
+
     /**
      * Show link detail panel.
      * data: {linkId, linkType, source, target, bandwidth_utilization,
@@ -212,6 +221,15 @@ class UIController {
             `<div class="metric-block">` +
                 `<div class="metric-label"><span>丢包率</span><span class="mv" id="dLoss">--</span></div>` +
             `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>吞吐 / 容量</span><span class="mv" id="dTx">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>队列深度</span><span class="mv" id="dQueue">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>传播时延</span><span class="mv" id="dProp">--</span></div>` +
+            `</div>` +
             `<div class="detail-status"><span class="dot" id="dStatusDot"></span><span id="dStatus">--</span></div>`;
 
         document.getElementById('detailPanel').style.display = 'block';
@@ -236,6 +254,17 @@ class UIController {
 
         const loss = document.getElementById('dLoss');
         if (loss) loss.textContent = ((Number(data.loss_rate) || 0) * 100).toFixed(3) + ' %';
+
+        // Protocol v3 packet-level telemetry
+        const tx = document.getElementById('dTx');
+        if (tx) tx.textContent = this.fmtBps(data.tx_bps) + ' / ' + this.fmtBps(data.capacity_bps);
+
+        const q = document.getElementById('dQueue');
+        if (q) q.textContent = (Number(data.queue_depth) || 0) + ' / ' +
+                               (Number(data.queue_capacity) || 0) + ' 包';
+
+        const prop = document.getElementById('dProp');
+        if (prop) prop.textContent = (Number(data.propagation_ms) || 0).toFixed(2) + ' ms';
 
         const active = data.is_active !== false;
         const dot = document.getElementById('dStatusDot');
@@ -270,6 +299,18 @@ class UIController {
             `</div>` +
             `<div class="metric-block">` +
                 `<div class="metric-label"><span>高度</span><span class="mv" id="dAlt">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>发送 / 接收包数</span><span class="mv" id="dPktsSr">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>转发包数</span><span class="mv" id="dPktsFwd">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>丢包数</span><span class="mv" id="dPktsDrop">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>端到端时延 / 抖动</span><span class="mv" id="dE2e">--</span></div>` +
             `</div>`;
 
         document.getElementById('detailPanel').style.display = 'block';
@@ -284,6 +325,25 @@ class UIController {
         if (lon && data.lon != null) lon.textContent = Number(data.lon).toFixed(2) + '°';
         if (lat && data.lat != null) lat.textContent = Number(data.lat).toFixed(2) + '°';
         if (alt && data.alt != null) alt.textContent = Math.round(Number(data.alt)).toLocaleString() + ' km';
+
+        // Protocol v3 per-node packet telemetry (— when absent, e.g. v2 core)
+        const sr = document.getElementById('dPktsSr');
+        if (sr) sr.textContent = (data.pkts_sent != null && data.pkts_recv != null)
+            ? Number(data.pkts_sent).toLocaleString() + ' / ' + Number(data.pkts_recv).toLocaleString()
+            : '—';
+
+        const fwd = document.getElementById('dPktsFwd');
+        if (fwd) fwd.textContent = data.pkts_fwd != null
+            ? Number(data.pkts_fwd).toLocaleString() : '—';
+
+        const drop = document.getElementById('dPktsDrop');
+        if (drop) drop.textContent = data.pkts_dropped != null
+            ? Number(data.pkts_dropped).toLocaleString() : '—';
+
+        const e2e = document.getElementById('dE2e');
+        if (e2e) e2e.textContent = (data.e2e_latency_ms != null && data.e2e_latency_ms > 0)
+            ? Number(data.e2e_latency_ms).toFixed(1) + ' / ' + Number(data.jitter_ms || 0).toFixed(2) + ' ms'
+            : '—';
     }
 
     hideDetail() {
