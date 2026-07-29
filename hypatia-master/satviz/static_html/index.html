@@ -341,6 +341,64 @@
         }
         #speedSelect option { background: #161b27; }
 
+        /* ---------- File transfer panel (Milestone A, C期) ---------- */
+        #filePanel { right: 14px; top: 372px; width: 300px; max-height: calc(100vh - 470px); display: flex; flex-direction: column; }
+        #filePanel .panel-body { overflow-y: auto; }
+        #fileReopen { right: 14px; top: 372px; }
+        .file-form { display: flex; flex-direction: column; gap: 7px; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+        .file-form .f-row { display: flex; gap: 7px; }
+        .file-form .f-field { flex: 1; display: flex; flex-direction: column; gap: 3px; }
+        .file-form label { font-size: 10.5px; color: var(--text-dim); letter-spacing: 0.5px; }
+        .file-form select, .file-form input[type="number"] {
+            width: 100%; background: rgba(255,255,255,0.08); color: var(--text);
+            border: 1px solid var(--border); border-radius: 7px; padding: 5px 7px; font-size: 12px;
+        }
+        .file-form select option { background: #161b27; }
+        .file-pick {
+            display: flex; align-items: center; gap: 8px; cursor: pointer;
+            background: rgba(255,255,255,0.06); border: 1px dashed var(--border);
+            border-radius: 8px; padding: 8px 10px; font-size: 12px; color: var(--text-dim);
+            transition: background 0.15s;
+        }
+        .file-pick:hover { background: rgba(255,255,255,0.12); color: var(--text); }
+        .file-pick.has-file { color: var(--text); border-style: solid; }
+        .file-pick .fname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .file-pick .fsize { color: var(--text-dim); font-size: 11px; }
+        .file-send-btn {
+            background: var(--accent); color: #04121f; border: none; border-radius: 8px;
+            padding: 8px; font-size: 12.5px; font-weight: 600; cursor: pointer; transition: background 0.15s;
+        }
+        .file-send-btn:hover { background: #67d3fb; }
+        .file-send-btn:disabled { background: rgba(255,255,255,0.12); color: var(--text-dim); cursor: not-allowed; }
+        .file-list { display: flex; flex-direction: column; gap: 8px; }
+        .file-empty { font-size: 11.5px; color: var(--text-dim); text-align: center; padding: 8px 0; }
+        .file-card {
+            background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+            border-radius: 9px; padding: 9px 10px; cursor: pointer; transition: background 0.15s, border-color 0.15s;
+        }
+        .file-card:hover { background: rgba(255,255,255,0.09); }
+        .file-card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+        .file-card .fc-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; }
+        .file-card .fc-name { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+        .file-card .fc-badge { font-size: 10px; padding: 2px 7px; border-radius: 999px; font-weight: 600; flex-shrink: 0; }
+        .fc-badge.TRANSFERRING { background: rgba(56,189,248,0.18); color: var(--accent); }
+        .fc-badge.COMPLETE { background: rgba(52,211,153,0.18); color: var(--good); }
+        .fc-badge.CANCELLED { background: rgba(139,152,169,0.18); color: var(--text-dim); }
+        .fc-badge.STORED { background: rgba(251,191,36,0.18); color: var(--warn); }
+        .file-card .fc-bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.1); overflow: hidden; margin-bottom: 6px; }
+        .file-card .fc-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--good)); border-radius: 3px; transition: width 0.3s; }
+        .file-card .fc-meta { font-size: 10.5px; color: var(--text-dim); line-height: 1.5; font-variant-numeric: tabular-nums; }
+        .file-card .fc-meta b { color: var(--text); font-weight: 600; }
+        .file-card .fc-path { font-size: 10px; color: var(--text-dim); margin-top: 3px; word-break: break-all; }
+        .file-card .fc-actions { display: flex; gap: 6px; margin-top: 7px; }
+        .file-card .fc-actions button {
+            flex: 1; font-size: 11px; padding: 4px 6px; border-radius: 6px; cursor: pointer;
+            border: 1px solid var(--border); background: rgba(255,255,255,0.07); color: var(--text);
+        }
+        .file-card .fc-actions button:hover { background: rgba(255,255,255,0.16); }
+        .file-card .fc-actions button.dl { background: rgba(52,211,153,0.16); color: var(--good); border-color: rgba(52,211,153,0.4); }
+        .file-card .fc-actions button.cancel { color: var(--bad); }
+
         /* ---------- Hint toast ---------- */
         #hintToast {
             position: absolute;
@@ -432,6 +490,52 @@
         <div class="panel-body" id="detailBody"></div>
     </div>
 
+    <!-- File transfer panel (right, Milestone A C期) -->
+    <div id="filePanel" class="glass side-panel">
+        <div class="panel-header">
+            <span>文件传输</span>
+            <button class="collapse-btn" id="fileCollapse" title="收起">›</button>
+        </div>
+        <div class="panel-body">
+            <div class="file-form">
+                <label class="file-pick" id="filePick">
+                    <input type="file" id="fileInput" style="display:none">
+                    <span>📁</span>
+                    <span class="fname" id="fileName">选择要传输的文件…</span>
+                    <span class="fsize" id="fileSize"></span>
+                </label>
+                <div class="f-row">
+                    <div class="f-field">
+                        <label>源端</label>
+                        <select id="fileSrc"></select>
+                    </div>
+                    <div class="f-field">
+                        <label>目的端</label>
+                        <select id="fileDst"></select>
+                    </div>
+                </div>
+                <div class="f-row">
+                    <div class="f-field">
+                        <label>优先级</label>
+                        <select id="filePrio">
+                            <option value="0">高 (UAV)</option>
+                            <option value="1" selected>尽力 (ship)</option>
+                        </select>
+                    </div>
+                    <div class="f-field">
+                        <label>速率上限 (Mbps)</label>
+                        <input type="number" id="fileRate" value="5" min="0.1" step="0.1">
+                    </div>
+                </div>
+                <button class="file-send-btn" id="fileSendBtn" disabled>上传并发送</button>
+            </div>
+            <div class="file-list" id="fileList">
+                <div class="file-empty">暂无传输任务</div>
+            </div>
+        </div>
+    </div>
+    <div id="fileReopen" class="reopen-tab" title="展开文件传输">📄</div>
+
     <!-- Time-series charts panel (bottom-left) -->
     <div id="chartPanel" class="glass side-panel">
         <div class="panel-header">
@@ -465,11 +569,11 @@
     <div id="hintToast">点击链路或节点查看实时状态 · 右键取消选择</div>
 
     <!-- JavaScript Modules -->
-    <script src="../js/websocket.js?v=3h0"></script>
-    <script src="../js/chart.js?v=3h0"></script>
-    <script src="../js/packet-flow.js?v=3h0"></script>
-    <script src="../js/cesium-manager.js?v=3h0"></script>
-    <script src="../js/ui-controller.js?v=3h0"></script>
-    <script src="../js/app.js?v=3h0"></script>
+    <script src="../js/websocket.js?v=3i0"></script>
+    <script src="../js/chart.js?v=3i0"></script>
+    <script src="../js/packet-flow.js?v=3i0"></script>
+    <script src="../js/cesium-manager.js?v=3i0"></script>
+    <script src="../js/ui-controller.js?v=3i0"></script>
+    <script src="../js/app.js?v=3i0"></script>
 </body>
 </html>

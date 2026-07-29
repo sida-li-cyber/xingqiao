@@ -171,6 +171,8 @@ class SatelliteVisualizationApp {
 
             // Populate UI filters
             this.ui.populateNodeFilters(nodesByType);
+            // Milestone A (C期): fill the file-transfer src/dst selects
+            this.ui.populateFileNodes();
 
             console.log(
                 `[App] Nodes registered: ${nodesByType.satellite.length} sat, ` +
@@ -222,6 +224,12 @@ class SatelliteVisualizationApp {
             // keep the last known metrics for currently-quiet nodes.
             if (payload.node_metrics) {
                 Object.assign(this.nodeMetrics, payload.node_metrics);
+            }
+
+            // Milestone A (C期): live file-transfer tracker. The core omits
+            // the field when idle, so only refresh the UI when it is present.
+            if (payload.file_transfers) {
+                this.ui.updateFileTransfers(payload.file_transfers);
             }
 
             // Live-refresh the open detail panel (link or node)
@@ -337,6 +345,10 @@ class SatelliteVisualizationApp {
      * Update routing highlight path.
      */
     updateRouting(routing) {
+        // Milestone A (C期): a selected file transfer owns the route
+        // highlight — don't let the demo auto-cycle override it.
+        if (this.ui.isFileHighlightActive()) return;
+
         if (routing.highlight_path && routing.highlight_path.length >= 2) {
             const routeKey = routing.highlight_path.join(',');
             if (this.currentRoute !== routeKey) {

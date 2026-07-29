@@ -21,6 +21,14 @@ class UIController {
         this._detailKind = null;         // 'link' | 'node' | null
         this._detailId = null;           // linkId or nodeId currently shown
 
+        // File transfer (Milestone A, C期)
+        this._pendingFile = null;        // File object chosen for upload
+        this._selectedFileId = null;     // transfer whose path is highlighted
+        this._fileTransfers = {};        // latest file_transfers snapshot
+        this._filePathCache = null;      // last highlighted path signature
+        const wsHost = (this.ws && this.ws.host) ? this.ws.host : '127.0.0.1';
+        this.apiBase = `http://${wsHost}:8000`;
+
         // Display metadata for badges
         this.linkTypeMeta = {
             isl: { label: 'ISL 星间链路', color: '#4FC3F7' },
@@ -121,6 +129,10 @@ class UIController {
         this._bindCollapse('layersPanel', 'layersCollapse', 'layersReopen');
         this._bindCollapse('statsPanel', 'statsCollapse', 'statsReopen');
         this._bindCollapse('chartPanel', 'chartCollapse', 'chartReopen');
+        this._bindCollapse('filePanel', 'fileCollapse', 'fileReopen');
+
+        // File transfer panel (Milestone A, C期)
+        this.initFilePanel();
 
         // Detail panel close
         document.getElementById('detailClose').addEventListener('click', () => {
@@ -497,6 +509,254 @@ class UIController {
             this.charts.latency.clear();
             this.charts.loss.clear();
         }
+    }
+
+    // ==================================================================
+    // File transfer (Milestone A, C期)
+    // ==================================================================
+
+    initFilePanel() {
+        const input = document.getElementById('fileInput');
+        if (input) {
+            input.addEventListener('change', () => this.onFilePicked(input.files[0]));
+        }
+        const send = document.getElementById('fileSendBtn');
+        if (send) send.addEventListener('click', () => this.onFileSend());
+
+        // Event delegation for per-card buttons (cancel / download) and select.
+        const list = document.getElementById('fileList');
+        if (list) {
+            list.addEventListener('click', (e) => {
+                const btn = e.target.closest('button');
+                const card = e.target.closest('.file-card');
+                if (!card) return;
+                const fid = card.dataset.fid;
+                if (btn && btn.classList.contains('cancel')) {
+                    e.stopPropagation();
+                    this.cancelFile(fid);
+                    return;
+                }
+                if (btn && btn.classList.contains('dl')) {
+                    e.stopPropagation();
+                    this.downloadFile(fid);
+                    return;
+                }
+                if (!btn) this.selectFile(fid);
+            });
+        }
+    }
+
+    /** Fill the source / destination selects from the simulation node set. */
+    populateFileNodes() {
+        const meta = (this.app && this.app.nodeMetadata) || {};
+        const srcs = [];
+        const dsts = [];
+        for (const [id, m] of Object.entries(meta)) {
+            if (m.type === 'uav' || m.type === 'ship') srcs.push([id, m.label || id]);
+            if (m.type === 'ground_station') dsts.push([id, m.label || id]);
+        }
+        const fill = (selId, items, fallback) => {
+            const sel = document.getElementById(selId);
+            if (!sel) return;
+            sel.innerHTML = '';
+            if (!items.length) {
+                const o = document.createElement('option');
+                o.value = fallback; o.textContent = fallback;
+                sel.appendChild(o);
+                return;
+            }
+            for (const [val, lbl] of items) {
+                const o = document.createElement('option');
+                o.value = val; o.textContent = `${lbl} (${val})`;
+                sel.appendChild(o);
+            }
+        };
+        fill('fileSrc', srcs, 'UAV-01');
+        fill('fileDst', dsts, 'Beijing');
+        // Sensible defaults
+        const src = document.getElementById('fileSrc');
+        if (src && src.querySelector('option[value="UAV-01"]')) src.value = 'UAV-01';
+        const dst = document.getElementById('fileDst');
+        if (dst && dst.querySelector('option[value="Beijing"]')) dst.value = 'Beijing';
+    }
+
+    _updateSendBtn() {
+        const btn = document.getElementById('fileSendBtn');
+        if (btn) btn.disabled = !this._pendingFile;
+    }
+
+    onFilePicked(file) {
+        this._pendingFile = file || null;
+        const nameEl = document.getElementById('fileName');
+        const sizeEl = document.getElementById('fileSize');
+        const pick = document.getElementById('filePick');
+        if (file) {
+            nameEl.textContent = file.name;
+            sizeEl.textContent = this.fmtBytes(file.size);
+            pick.classList.add('has-file');
+        } else {
+            nameEl.textContent = '选择要传输的文件…';
+            sizeEl.textContent = '';
+            pick.classList.remove('has-file');
+        }
+        this._updateSendBtn();
+    }
+
+    async onFileSend() {
+        const file = this._pendingFile;
+        if (!file) return;
+        const btn = document.getElementById('fileSendBtn');
+        const src = document.getElementById('fileSrc').value;
+        const dst = document.getElementById('fileDst').value;
+        const prio = parseInt(document.getElementById('filePrio').value, 10);
+        const rateMbps = parseFloat(document.getElementById('fileRate').value) || 5;
+        const rateBps = rateMbps * 1e6;
+
+        btn.disabled = true;
+        const oldLabel = btn.textContent;
+        btn.textContent = '上传中…';
+        try {
+            const fd = new FormData();
+            fd.append('file', file, file.name);
+            const resp = await fetch(`${this.apiBase}/api/files/upload`,
+                { method: 'POST', body: fd });
+            if (!resp.ok) throw new Error('upload HTTP ' + resp.status);
+            const rec = await resp.json();
+
+            this.ws.sendCommand('file_send', {
+                file_id: rec.file_id, src, dst, prio, rate_bps: rateBps,
+            });
+
+            // Seed an immediate card so the user sees feedback before the
+            // first state_update arrives.
+            this._fileTransfers[rec.file_id] = {
+                name: file.name, src, dst, state: 'TRANSFERRING',
+                progress: 0, delivered_bytes: 0, total_bytes: rec.total_bytes,
+                eta_s: 0, throughput_bps: 0, path: [], in_flight: 0, retx: 0,
+            };
+            this.renderFileList();
+            this.selectFile(rec.file_id);
+
+            // Reset the picker for the next transfer.
+            document.getElementById('fileInput').value = '';
+            this.onFilePicked(null);
+        } catch (err) {
+            console.error('[UI] file upload/send failed:', err);
+            alert('上传失败：' + err.message + '\n（确认后端 realtime_backend 已启动）');
+            btn.disabled = false;
+            btn.textContent = oldLabel;
+        }
+    }
+
+    /** Called by app.js on every state_update carrying file_transfers. */
+    updateFileTransfers(fileTransfers) {
+        this._fileTransfers = fileTransfers || {};
+        this.renderFileList();
+        this._applyFileHighlight();
+    }
+
+    renderFileList() {
+        const list = document.getElementById('fileList');
+        if (!list) return;
+        const entries = Object.entries(this._fileTransfers);
+        if (!entries.length) {
+            list.innerHTML = '<div class="file-empty">暂无传输任务</div>';
+            return;
+        }
+        const stateLabel = {
+            TRANSFERRING: '传输中', COMPLETE: '已完成',
+            CANCELLED: '已取消', STORED: '待发送',
+        };
+        list.innerHTML = entries.map(([fid, t]) => {
+            const pct = Math.round((t.progress || 0) * 100);
+            const sel = fid === this._selectedFileId ? ' selected' : '';
+            const path = (t.path && t.path.length) ? t.path.join(' → ') : '—';
+            let actions = '';
+            if (t.state === 'TRANSFERRING') {
+                actions = `<div class="fc-actions"><button class="cancel">取消</button></div>`;
+            } else if (t.state === 'COMPLETE') {
+                actions = `<div class="fc-actions"><button class="dl">下载</button></div>`;
+            }
+            const thr = this.fmtThroughput(t.throughput_bps);
+            const eta = t.state === 'TRANSFERRING' ? this.fmtEta(t.eta_s) : '—';
+            return `<div class="file-card${sel}" data-fid="${fid}">` +
+                `<div class="fc-top"><span class="fc-name" title="${t.name}">${t.name}</span>` +
+                `<span class="fc-badge ${t.state}">${stateLabel[t.state] || t.state}</span></div>` +
+                `<div class="fc-bar"><div style="width:${pct}%"></div></div>` +
+                `<div class="fc-meta">` +
+                `<b>${pct}%</b> · ${this.fmtBytes(t.delivered_bytes)}/${this.fmtBytes(t.total_bytes)}<br>` +
+                `${thr} · ETA ${eta} · 重传 ${t.retx || 0}` +
+                `</div>` +
+                `<div class="fc-path">${t.src} → ${t.dst} · ${path}</div>` +
+                actions +
+                `</div>`;
+        }).join('');
+    }
+
+    selectFile(fid) {
+        this._selectedFileId = (this._selectedFileId === fid) ? null : fid;
+        this._filePathCache = null;
+        this.renderFileList();
+        this._applyFileHighlight();
+    }
+
+    /** Highlight the selected transfer's path; suppress the auto route cycle. */
+    _applyFileHighlight() {
+        if (!this._selectedFileId) {
+            if (this._filePathCache !== null) {
+                this._filePathCache = null;
+                this.cesium.clearRouteHighlights();
+            }
+            return;
+        }
+        const t = this._fileTransfers[this._selectedFileId];
+        const path = (t && t.path) ? t.path : [];
+        const sig = path.join(',');
+        if (sig && sig !== this._filePathCache && path.length >= 2) {
+            this._filePathCache = sig;
+            this.cesium.highlightRoute(path);
+        }
+    }
+
+    /** True when a transfer is selected (app.js skips the auto route cycle). */
+    isFileHighlightActive() {
+        return !!this._selectedFileId;
+    }
+
+    cancelFile(fid) {
+        this.ws.sendCommand('file_cancel', { file_id: fid });
+    }
+
+    downloadFile(fid) {
+        const t = this._fileTransfers[fid] || {};
+        const a = document.createElement('a');
+        a.href = `${this.apiBase}/api/files/${fid}/download`;
+        a.download = t.name || fid;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
+
+    fmtBytes(n) {
+        n = Number(n) || 0;
+        if (n >= 1e9) return (n / 1e9).toFixed(2) + ' GB';
+        if (n >= 1e6) return (n / 1e6).toFixed(2) + ' MB';
+        if (n >= 1e3) return (n / 1e3).toFixed(1) + ' KB';
+        return n + ' B';
+    }
+
+    fmtThroughput(bps) {
+        const v = Number(bps) || 0;
+        if (v >= 1e6) return (v / 1e6).toFixed(2) + ' Mbps';
+        if (v >= 1e3) return (v / 1e3).toFixed(1) + ' Kbps';
+        return v.toFixed(0) + ' bps';
+    }
+
+    fmtEta(s) {
+        s = Number(s) || 0;
+        if (s <= 0) return '—';
+        if (s < 60) return s.toFixed(0) + 's';
+        return Math.floor(s / 60) + 'm' + Math.round(s % 60) + 's';
     }
 
     // ==================================================================
