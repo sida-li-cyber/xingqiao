@@ -183,7 +183,7 @@
 
 - **A 期（控制面）✅**：`FileTransfer` 模型 + `Packet` 增字段 + 分片注入 / 送达 / 丢弃 / ARQ 重传 + 守恒验证测试（`test_phase8.py` 风格，合成字节，固定种子）。**不涉及真实字节搬运**，仅验证 DES 行为与守恒。
 - **B 期（数据面）✅**：后端 `/api/files/*` HTTP 端点 + 字节存储 + 由 DES 送达事件驱动的重组 + 下载（`realtime_backend/files.py` + `files_api.py`，`main.py` 富化转发 `file_send`/`file_cancel` 并拦截 `file_event`，`demo_sim_core` 接入引擎接口）；端到端真实字节落地验证见 `tests/test_file_e2e.py`（上传→传输→下载 SHA-256 一致 + 取消）。
-- **C 期（前端）**：上传 UI + 追踪器 + 路径高亮 + 脉冲标记 + 下载。
+- **C 期（前端）✅**：上传 UI（`#filePanel` 文件选择 + 源/目的/优先级/速率）+ 并发追踪器（进度条/吞吐/ETA/重传/状态/取消/下载）+ 路径高亮（选中传输 → `highlightRoute` 链路辉光，优先于演示自动轮播）；消费 `state_update.file_transfers` 增量。脉冲动画归入里程碑 B。
 - **D 期（文档）**：协议文档更新（`docs/protocol-v3.2-file-transfer.md`）、README、ROADMAP 实施记录。
 
 ---
