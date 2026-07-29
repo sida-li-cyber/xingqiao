@@ -7,7 +7,14 @@ loop would, and verifies that genuine packet-level metrics emerge:
   - SUL/SSL uplinks carry traffic (UAVs/ships -> nearest ground station)
   - per-node counters and e2e latency are populated
 """
+import os
+import sys
 import time
+
+# Engine modules live in <root>/hypatia-master/satviz; tests in <root>/tests.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "hypatia-master", "satviz")))
+
 from demo_sim_core import DemoSimCore
 
 

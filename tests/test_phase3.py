@@ -11,6 +11,12 @@ Phase 3 tests for the packet-level DES engine:
 
 Run:  python test_phase3.py
 """
+import os
+import sys
+
+# Engine modules live in <root>/hypatia-master/satviz; tests in <root>/tests.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "hypatia-master", "satviz")))
 
 from packet_sim import PacketEngine, PRIO_HIGH, PRIO_BEST_EFFORT
 

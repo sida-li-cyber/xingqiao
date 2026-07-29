@@ -27,8 +27,8 @@ from pathlib import Path
 import websockets
 
 HERE = Path(__file__).resolve()
-SATVIZ = HERE.parent
-PROJECT_ROOT = SATVIZ.parent.parent           # dayilixiang-v3/
+PROJECT_ROOT = HERE.parent.parent             # dayilixiang-v3/
+SATVIZ = PROJECT_ROOT / "hypatia-master" / "satviz"
 
 HOST = "127.0.0.1"
 PORT = 8767

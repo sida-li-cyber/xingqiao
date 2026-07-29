@@ -28,7 +28,12 @@ Run:  python test_phase8.py          (tests 17-21, ~10 s)
       python test_phase8.py --fast   (alias; same set, kept for symmetry)
 """
 
+import os
 import sys
+
+# Engine modules live in <root>/hypatia-master/satviz; tests in <root>/tests.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "hypatia-master", "satviz")))
 
 import packet_sim as ps
 from packet_sim import PacketEngine

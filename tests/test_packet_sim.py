@@ -7,6 +7,13 @@ Test 2 (congestion): bottleneck a link with low capacity + high arrival
 rate. Verify queues build, loss appears, and e2e latency rises above the
 pure-propagation floor.
 """
+import os
+import sys
+
+# Engine modules live in <root>/hypatia-master/satviz; tests in <root>/tests.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "hypatia-master", "satviz")))
+
 import packet_sim as ps
 
 

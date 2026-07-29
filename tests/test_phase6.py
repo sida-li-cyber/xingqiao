@@ -22,8 +22,13 @@ Run:  python test_phase6.py          (all tests, ~2-3 min)
       python test_phase6.py --fast   (skip the two long runs, ~20 s)
 """
 
+import os
 import sys
 import time
+
+# Engine modules live in <root>/hypatia-master/satviz; tests in <root>/tests.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "hypatia-master", "satviz")))
 
 import packet_sim as ps
 

@@ -22,8 +22,13 @@ Run:  python test_phase7.py          (tests 12-15, ~40 s)
 """
 
 import json
+import os
 import sys
 import time
+
+# Engine modules live in <root>/hypatia-master/satviz; tests in <root>/tests.
+sys.path.insert(0, os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "..", "hypatia-master", "satviz")))
 
 import demo_sim_core as dsc
 from demo_sim_core import DemoSimCore, create_constellation
