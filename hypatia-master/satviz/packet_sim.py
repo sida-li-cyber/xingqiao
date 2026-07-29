@@ -50,6 +50,8 @@ from collections import deque, defaultdict
 GEN = 0   # a: source node
 TX = 1    # a: (u, v) directed link whose transmission completed
 ARR = 2   # a: node, b: packet
+FGEN = 3  # a: file_id          (Milestone A: paced file-chunk injection)
+FRET = 4  # a: (file_id, seq, deadline)  (Milestone A: ARQ retx timeout)
 
 _INF = float("inf")
 
@@ -61,9 +63,10 @@ PRIO_BEST_EFFORT = 1   # e.g. ship bulk data
 
 class Packet:
     __slots__ = ("pid", "src", "dst", "size", "inject_time", "enq_time",
-                 "hops", "alive", "prio")
+                 "hops", "alive", "prio", "file_id", "chunk_seq")
 
-    def __init__(self, pid, src, dst, size, inject_time, prio=PRIO_BEST_EFFORT):
+    def __init__(self, pid, src, dst, size, inject_time, prio=PRIO_BEST_EFFORT,
+                 file_id=None, chunk_seq=-1):
         self.pid = pid
         self.src = src
         self.dst = dst
@@ -73,6 +76,12 @@ class Packet:
         self.hops = 0
         self.alive = False           # True once it has entered the network
         self.prio = prio             # QoS priority level (0 = highest)
+        # File-transfer identity (Milestone A). Background Poisson packets keep
+        # file_id=None and behave exactly as before; file chunks carry the
+        # owning transfer id and their 0-based chunk index so the engine can
+        # drive selective-repeat ARQ and the data plane can reassemble bytes.
+        self.file_id = file_id
+        self.chunk_seq = chunk_seq
 
 
 class Link:
@@ -144,6 +153,10 @@ DEFAULT_CONFIG = {
     "route_refresh_interval": 5.0,    # seconds
     "link_error_rate": 0.0,           # per-packet corruption probability
     "max_in_flight": 100000,          # backpressure safety valve
+    # Milestone A: file transfer (control plane)
+    "file_window_chunks": 64,         # sliding-window: max outstanding chunks
+    "file_rto_s": 0.2,                # ARQ retransmission timeout (seconds)
+    "file_default_rate_bps": 5e6,     # injection rate when a transfer has no cap
     "capacity": {                     # per-direction capacity (bps) by type
         "isl": 1e10,
         "gsl": 1e9,
@@ -151,6 +164,72 @@ DEFAULT_CONFIG = {
         "ssl": 5e8,
     },
 }
+
+
+# File-transfer states (Milestone A control plane).
+FT_TRANSFERRING = 0
+FT_COMPLETE = 1
+FT_CANCELLED = 2
+
+
+class FileTransfer:
+    """One file transfer as seen by the DES control plane.
+
+    The engine models the transfer as a stream of fixed-size abstract chunks
+    (Packet.file_id / chunk_seq). It paces injection, routes each chunk like an
+    ordinary packet, and drives selective-repeat ARQ purely from timeouts: a
+    chunk that is not delivered within ``rto`` seconds is presumed lost and
+    re-injected (counted as a freshly generated packet, so the global
+    conservation invariant still holds exactly).
+
+    No real payload bytes are held here — the backend data plane stores those
+    and reassembles them from the ``file_chunk_delivered`` events the engine
+    emits. This keeps the DES process lightweight even for large files.
+    """
+
+    __slots__ = ("file_id", "name", "src", "dst", "total_bytes", "chunk_size",
+                 "total_chunks", "prio", "rate_cap_bps", "state",
+                 "delivered", "pending", "next_seq", "retx_count",
+                 "start_time", "complete_time", "rto", "interval")
+
+    def __init__(self, file_id, name, src, dst, total_bytes, chunk_size,
+                 prio, rate_cap_bps, rto, now):
+        self.file_id = file_id
+        self.name = name
+        self.src = src
+        self.dst = dst
+        self.total_bytes = int(total_bytes)
+        self.chunk_size = int(chunk_size)
+        self.total_chunks = max(1, -(-self.total_bytes // self.chunk_size))  # ceil
+        self.prio = prio
+        self.rate_cap_bps = rate_cap_bps
+        self.state = FT_TRANSFERRING
+        self.delivered = set()        # chunk seqs delivered (deduped)
+        self.pending = {}             # seq -> retx deadline (outstanding chunks)
+        self.next_seq = 0             # next chunk to inject for the first time
+        self.retx_count = 0
+        self.start_time = now
+        self.complete_time = None
+        self.rto = rto
+        # Pacing interval between first-time chunk injections (seconds).
+        bps = rate_cap_bps if rate_cap_bps and rate_cap_bps > 0 else None
+        if bps:
+            self.interval = (self.chunk_size * 8.0) / bps
+        else:
+            self.interval = 0.001     # near-line-rate when uncapped
+
+    def chunk_bytes(self, seq):
+        """Real byte length of a chunk (the last one may be short)."""
+        start = seq * self.chunk_size
+        return min(self.chunk_size, max(0, self.total_bytes - start))
+
+    @property
+    def delivered_bytes(self):
+        return sum(self.chunk_bytes(s) for s in self.delivered)
+
+    @property
+    def progress(self):
+        return (self.delivered_bytes / self.total_bytes) if self.total_bytes else 1.0
 
 
 class PacketEngine:
@@ -186,6 +265,9 @@ class PacketEngine:
         self._last_route_refresh = -_INF
 
         self._pid = 0
+        # Milestone A: file-transfer control plane.
+        self.files = {}               # file_id -> FileTransfer
+        self.file_events = []         # outbound events for data plane / protocol
         self._reset_counters()
 
     # ------------------------------------------------------------------
@@ -219,6 +301,10 @@ class PacketEngine:
         self._gen_scheduled = set()
         self._last_route_refresh = -_INF
         self._topo_dirty = True
+        # Milestone A: a time discontinuity abandons in-flight file chunks
+        # (their FGEN/FRET events just vanished with the heap).
+        self.files = {}
+        self.file_events = []
         self._reset_counters()
         for lk in self.links.values():
             lk.bytes_tx = 0
@@ -416,6 +502,10 @@ class PacketEngine:
                 self._on_generate(a, t)
             elif kind == TX:
                 self._on_tx_complete(a[0], a[1], t)
+            elif kind == FGEN:
+                self._on_file_gen(a, t)
+            elif kind == FRET:
+                self._on_file_retx(a[0], a[1], a[2], t)
             else:  # ARR
                 self._on_arrive(a, b, t)
         self.now = until
@@ -579,6 +669,8 @@ class PacketEngine:
             self.e2e_samples.append(e2e)
             self.node_e2e[packet.src].append(e2e)
             self.node_e2e[node].append(e2e)
+            if packet.file_id is not None:
+                self._on_file_chunk_delivered(packet, t)
             self.in_flight -= 1
             packet.alive = False
             return
@@ -595,6 +687,190 @@ class PacketEngine:
             packet.alive = False
             return
         self._enqueue(node, nh, packet, t)
+
+    # ------------------------------------------------------------------
+    # File transfer (Milestone A control plane)
+    # ------------------------------------------------------------------
+
+    def start_file(self, file_id, name, src, dst, total_bytes,
+                   chunk_size=None, prio=None, rate_cap_bps=None):
+        """Register a file transfer and begin paced chunk injection.
+
+        The file is modelled as ``ceil(total_bytes/chunk_size)`` abstract
+        chunks routed from ``src`` to ``dst`` like ordinary packets, with
+        timeout-driven selective-repeat ARQ. No payload bytes are handled
+        here — the backend data plane stores those and reassembles them from
+        the ``file_chunk_delivered`` events this engine emits.
+        """
+        if chunk_size is None or chunk_size <= 0:
+            chunk_size = 16384
+        if prio is None:
+            prio = self.cfg["default_prio"]
+        if rate_cap_bps is None:
+            rate_cap_bps = self.cfg["file_default_rate_bps"]
+        ft = FileTransfer(file_id, name, src, dst, total_bytes, chunk_size,
+                          prio, rate_cap_bps, self.cfg["file_rto_s"], self.now)
+        self.files[file_id] = ft
+        # Make sure the destination is routable even if it is not already a
+        # background-flow sink, and force a route refresh on the next advance.
+        self.sinks.add(dst)
+        self._last_route_refresh = -_INF
+        self._seq += 1
+        heapq.heappush(self.events, (self.now, self._seq, FGEN, file_id, None))
+        self.file_events.append({
+            "type": "file_started", "file_id": file_id, "name": name,
+            "src": src, "dst": dst, "total_bytes": ft.total_bytes,
+            "total_chunks": ft.total_chunks, "prio": prio,
+        })
+        return ft
+
+    def cancel_file(self, file_id):
+        ft = self.files.get(file_id)
+        if ft is None or ft.state != FT_TRANSFERRING:
+            return
+        ft.state = FT_CANCELLED
+        ft.pending = {}
+        self.file_events.append({"type": "file_cancelled", "file_id": file_id})
+
+    def _on_file_gen(self, file_id, t):
+        """Sliding-window paced injection of first-time chunks."""
+        ft = self.files.get(file_id)
+        if ft is None or ft.state != FT_TRANSFERRING:
+            return
+        window = self.cfg["file_window_chunks"]
+        made = False
+        if ft.next_seq < ft.total_chunks and len(ft.pending) < window:
+            if self._inject_file_chunk(ft, ft.next_seq, t):
+                ft.next_seq += 1
+                made = True
+        # Keep the pump running while first-time chunks remain. When the window
+        # is full (or we are backpressured) retry soon so deliveries reopen it.
+        if ft.next_seq < ft.total_chunks and ft.state == FT_TRANSFERRING:
+            delay = ft.interval if made else min(ft.interval, 0.02)
+            self._seq += 1
+            heapq.heappush(self.events,
+                           (t + delay, self._seq, FGEN, file_id, None))
+
+    def _inject_file_chunk(self, ft, seq, t):
+        """Create one chunk packet, arm its ARQ timer, and forward it.
+
+        Returns False only under global backpressure (caller retries later
+        without consuming the chunk). A missing route is counted as a drop but
+        still returns True — the armed ARQ timer retries once a route appears.
+        Every created chunk counts as a generated packet, so conservation holds.
+        """
+        if self.in_flight >= self.cfg["max_in_flight"]:
+            return False
+        self._pid += 1
+        pkt = Packet(self._pid, ft.src, ft.dst, ft.chunk_bytes(seq), t, ft.prio,
+                     file_id=ft.file_id, chunk_seq=seq)
+        self.n_generated[ft.src] += 1
+        self.n_generated_prio[ft.prio] += 1
+
+        deadline = t + ft.rto
+        ft.pending[seq] = deadline
+        self._seq += 1
+        heapq.heappush(self.events,
+                       (deadline, self._seq, FRET,
+                        (ft.file_id, seq, deadline), None))
+
+        nh = self.route.get(ft.src, {}).get(ft.dst)
+        if nh is None:
+            self.n_dropped[ft.src] += 1
+            self.n_drop_window[ft.src] += 1
+            self.n_dropped_prio[ft.prio] += 1
+            self.total_dropped += 1
+            return True
+        self._enqueue(ft.src, nh, pkt, t)
+        return True
+
+    def _on_file_retx(self, file_id, seq, deadline, t):
+        """ARQ timeout: re-inject a chunk not delivered within its deadline."""
+        ft = self.files.get(file_id)
+        if ft is None or ft.state != FT_TRANSFERRING:
+            return
+        if seq in ft.delivered:
+            ft.pending.pop(seq, None)
+            return
+        if ft.pending.get(seq) != deadline:
+            return  # stale timer superseded by a newer injection
+        if self._inject_file_chunk(ft, seq, t):
+            ft.retx_count += 1
+        else:  # backpressured — re-arm a quick retry without losing the chunk
+            nd = t + 0.01
+            ft.pending[seq] = nd
+            self._seq += 1
+            heapq.heappush(self.events,
+                           (nd, self._seq, FRET, (ft.file_id, seq, nd), None))
+
+    def _on_file_chunk_delivered(self, packet, t):
+        ft = self.files.get(packet.file_id)
+        if ft is None or ft.state != FT_TRANSFERRING:
+            return
+        seq = packet.chunk_seq
+        if seq in ft.delivered:
+            return  # duplicate (late original after a retx) — ignore
+        ft.delivered.add(seq)
+        ft.pending.pop(seq, None)
+        self.file_events.append({
+            "type": "file_chunk_delivered", "file_id": ft.file_id, "seq": seq,
+            "bytes": ft.chunk_bytes(seq),
+        })
+        if len(ft.delivered) >= ft.total_chunks:
+            ft.state = FT_COMPLETE
+            ft.complete_time = t
+            ft.pending = {}
+            self.file_events.append({
+                "type": "file_complete", "file_id": ft.file_id,
+                "elapsed_s": t - ft.start_time, "retx": ft.retx_count,
+                "total_bytes": ft.total_bytes,
+            })
+
+    def _file_route_path(self, ft):
+        """Current forwarding chain src -> ... -> dst (best effort)."""
+        path = [ft.src]
+        node = ft.src
+        seen = {ft.src}
+        for _ in range(len(self.nodes) + 1):
+            nh = self.route.get(node, {}).get(ft.dst)
+            if nh is None:
+                break
+            path.append(nh)
+            if nh == ft.dst or nh in seen:
+                break
+            seen.add(nh)
+            node = nh
+        return path
+
+    def file_states(self):
+        """Snapshot of every transfer for the protocol layer."""
+        state_name = {FT_TRANSFERRING: "TRANSFERRING",
+                      FT_COMPLETE: "COMPLETE", FT_CANCELLED: "CANCELLED"}
+        out = {}
+        for fid, ft in self.files.items():
+            end = ft.complete_time if ft.complete_time is not None else self.now
+            elapsed = end - ft.start_time
+            thr_bytes = (ft.delivered_bytes / elapsed) if elapsed > 0 else 0.0
+            remaining = ft.total_bytes - ft.delivered_bytes
+            eta = (remaining / thr_bytes) if (thr_bytes > 0
+                                              and ft.state == FT_TRANSFERRING) else 0.0
+            out[fid] = {
+                "name": ft.name, "src": ft.src, "dst": ft.dst,
+                "state": state_name[ft.state],
+                "progress": ft.progress,
+                "delivered_bytes": ft.delivered_bytes,
+                "total_bytes": ft.total_bytes,
+                "eta_s": eta, "throughput_bps": thr_bytes * 8.0,
+                "path": self._file_route_path(ft),
+                "in_flight": len(ft.pending), "retx": ft.retx_count,
+            }
+        return out
+
+    def drain_file_events(self):
+        """Return and clear queued file events (for the data plane / protocol)."""
+        ev = self.file_events
+        self.file_events = []
+        return ev
 
     # ------------------------------------------------------------------
     # Snapshot (read metrics + reset windowed accumulators)
