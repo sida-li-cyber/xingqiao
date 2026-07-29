@@ -95,6 +95,10 @@ class CesiumManager {
 
         // Highlighted route path
         this._highlightedLinks = new Set();
+
+        // Performance: cache last color per link to avoid redundant material updates
+        this._linkColorCache = new Map(); // linkId -> last color string
+        this._batchDepth = 0;
     }
 
     // ======================================================================
@@ -247,6 +251,25 @@ class CesiumManager {
             if (entity.label) {
                 entity.label.show = new Cesium.ConstantProperty(style.labelShow);
             }
+        }
+    }
+
+    // ======================================================================
+    // Batch Update (performance)
+    // ======================================================================
+
+    beginBatch() {
+        if (this._batchDepth === 0) {
+            this.viewer.entities.suspendEvents();
+        }
+        this._batchDepth++;
+    }
+
+    endBatch() {
+        this._batchDepth--;
+        if (this._batchDepth <= 0) {
+            this._batchDepth = 0;
+            this.viewer.entities.resumeEvents();
         }
     }
 
@@ -422,17 +445,22 @@ class CesiumManager {
                 this.entities.links.set(linkId, link);
                 this.stats.links++;
             } else {
-                // Update existing link
+                // Update existing link — only touch material if color changed
                 const link = this.entities.links.get(linkId);
-                const color = this._getLinkDisplayColor(linkType, util);
 
                 if (!this._highlightedLinks.has(linkId)) {
-                    link.polyline.material = new Cesium.PolylineDashMaterialProperty({
-                        color: color,
-                    });
+                    const color = this._getLinkDisplayColor(linkType, util);
+                    const colorKey = color.toCssColorString();
+                    const cached = this._linkColorCache.get(linkId);
+                    if (cached !== colorKey) {
+                        link.polyline.material = new Cesium.PolylineDashMaterialProperty({
+                            color: color,
+                        });
+                        this._linkColorCache.set(linkId, colorKey);
+                    }
                 }
 
-                // Update properties
+                // Update properties (lightweight, no render trigger)
                 link.properties.bandwidth_utilization = util;
                 link.properties.latency_ms = properties.latency_ms || 0;
                 link.properties.loss_rate = properties.loss_rate || 0;
@@ -456,6 +484,7 @@ class CesiumManager {
             this.viewer.entities.remove(link);
             this.entities.links.delete(linkId);
             this._highlightedLinks.delete(linkId);
+            this._linkColorCache.delete(linkId);
             this.stats.links = Math.max(0, this.stats.links - 1);
         }
     }
@@ -507,9 +536,12 @@ class CesiumManager {
             return this._getGradientColor(metricValue);
         }
 
-        // Default: type-based color, alpha scaled by utilization
+        // Default: type-based color, alpha scaled by utilization.
+        // Quantize util to 0.1 steps so per-frame jitter doesn't force a
+        // material rebuild every update (works with _linkColorCache).
         const base = this.linkTypeColors[linkType] || Cesium.Color.WHITE;
-        const alpha = 0.3 + 0.7 * Math.max(0, Math.min(1, utilization));
+        const quantized = Math.round(utilization * 10) / 10;
+        const alpha = 0.3 + 0.7 * Math.max(0, Math.min(1, quantized));
         return base.withAlpha(alpha);
     }
 
@@ -742,6 +774,7 @@ class CesiumManager {
         this.entities.nodes.clear();
         this.entities.links.clear();
         this._highlightedLinks.clear();
+        this._linkColorCache.clear();
         this.stats = {
             satellites: 0,
             uavs: 0,

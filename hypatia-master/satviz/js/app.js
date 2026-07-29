@@ -143,6 +143,8 @@ class SatelliteVisualizationApp {
 
     handleStateUpdate(payload) {
         try {
+            this.cesium.beginBatch();
+
             // Update all node positions
             if (payload.positions) {
                 this.updatePositions(payload.positions);
@@ -153,23 +155,28 @@ class SatelliteVisualizationApp {
                 this.cesium.syncLinks(payload.links);
             }
 
+            this.cesium.endBatch();
+
             // Routing highlight
             if (payload.routing) {
                 this.updateRouting(payload.routing);
             }
 
-            // Metrics summary → UI panel
+            // Metrics summary → UI panel (throttled in UI layer)
             if (payload.metrics_summary) {
                 this.ui.updateMetricsSummary(payload.metrics_summary);
             }
 
-            // Simulation time
+            // Simulation time — only update display when user isn't dragging
             if (payload.timestamp != null) {
                 this.simulationTime = payload.timestamp;
-                this.ui.updateTimeDisplay(payload.timestamp);
+                if (!this.ui.isUserSeeking) {
+                    this.ui.updateTimeDisplay(payload.timestamp);
+                }
             }
 
         } catch (error) {
+            this.cesium.endBatch();
             console.error('[App] Error processing state_update:', error);
         }
     }

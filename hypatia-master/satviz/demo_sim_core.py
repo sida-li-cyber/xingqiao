@@ -499,7 +499,7 @@ class DemoSimCore:
             "payload": {
                 "version": "2.0",
                 "duration": self.duration,
-                "update_rate_hz": 10,
+                "update_rate_hz": 5,
                 "nodes": nodes,
                 "link_types": {
                     "isl": {"label": "星间链路", "color": "#4FC3F7"},
@@ -717,7 +717,7 @@ class DemoSimCore:
                     print("Sent simulation_init (v2)")
 
                     self.running = True
-                    update_interval = 0.1  # 10 Hz
+                    update_interval = 0.2  # 5 Hz (orbital motion is slow; 5Hz is smooth)
 
                     while self.running:
                         loop_start = time.time()

@@ -14,6 +14,11 @@ class UIController {
         this.selectedSatellites = new Set();
         this.selectedStations = new Set();
 
+        // Timeline: guard against state_update overwriting a user drag
+        this.isUserSeeking = false;
+        this._lastTimeInt = -1;          // only touch DOM when whole second changes
+        this._lastMetricsUpdate = 0;     // throttle metrics summary repaints
+
         this.scenarioInfo = {
             ideal:       'Avg loss: 0.1% | Jitter: 0.05%–0.5%',
             commercial:  'Avg loss: 1.0% | Jitter: 0.5%–4.0%',
@@ -64,6 +69,16 @@ class UIController {
         const timelineSlider = document.getElementById('timelineSlider');
         timelineSlider.addEventListener('input', (e) => this.onTimelineSeek(parseFloat(e.target.value)));
         document.getElementById('timelineInput').addEventListener('change', (e) => this.jumpToTime(parseFloat(e.target.value)));
+
+        // Track user drag so state_update doesn't fight the slider
+        timelineSlider.addEventListener('pointerdown', () => { this.isUserSeeking = true; });
+        window.addEventListener('pointerup', () => {
+            if (this.isUserSeeking) {
+                this.isUserSeeking = false;
+                // Commit the seek to the backend once the drag ends
+                this.jumpToTime(parseFloat(timelineSlider.value));
+            }
+        });
 
         // Metrics selection
         document.getElementById('metricsSelect').addEventListener('change', (e) => this.selectMetrics(e.target.value));
@@ -215,12 +230,16 @@ class UIController {
     }
 
     /**
-     * Update time display (called on each state update)
+     * Update time display (called on each state update).
+     * Only touches the DOM when the whole second changes to avoid jitter.
      */
     updateTimeDisplay(timestamp) {
-        document.getElementById('simTime').textContent = Math.floor(timestamp) + 's';
-        document.getElementById('timelineSlider').value = timestamp;
-        document.getElementById('timelineInput').value = Math.floor(timestamp);
+        const t = Math.floor(timestamp);
+        if (t === this._lastTimeInt) return;
+        this._lastTimeInt = t;
+        document.getElementById('simTime').textContent = t + 's';
+        document.getElementById('timelineSlider').value = t;
+        document.getElementById('timelineInput').value = t;
     }
 
     /**
@@ -642,8 +661,13 @@ class UIController {
 
     /**
      * Update metrics summary display (v2 state_update.metrics_summary).
+     * Throttled to ~2Hz — the numbers change slowly, no need to repaint at 10Hz.
      */
     updateMetricsSummary(summary) {
+        const now = Date.now();
+        if (now - this._lastMetricsUpdate < 500) return;
+        this._lastMetricsUpdate = now;
+
         const el = document.getElementById('metricsSummary');
         if (el) {
             el.textContent =
