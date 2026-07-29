@@ -702,11 +702,13 @@ class UIController {
 
     /** Highlight the selected transfer's path; suppress the auto route cycle. */
     _applyFileHighlight() {
+        const pf = this.cesium.packetFlow;
         if (!this._selectedFileId) {
             if (this._filePathCache !== null) {
                 this._filePathCache = null;
                 this.cesium.clearRouteHighlights();
             }
+            if (pf) pf.setFilePath(null);
             return;
         }
         const t = this._fileTransfers[this._selectedFileId];
@@ -715,6 +717,7 @@ class UIController {
         if (sig && sig !== this._filePathCache && path.length >= 2) {
             this._filePathCache = sig;
             this.cesium.highlightRoute(path);
+            if (pf) pf.setFilePath(path);
         }
     }
 

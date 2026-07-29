@@ -334,3 +334,5 @@ Hypatia 原生框架基于 ns-3（C++）做包级仿真，但存在以下问题�
 - **衔接里程碑 A**：文件分片的移动标记复用本脉冲风格，以文件专属颜色区分背景流量脉冲。
 
 **产出 / 验收**：脉冲动画与节点标记在 1080p 下清晰可分；1584 星 + 满载脉冲下前端仍 ≥30 FPS；包动画开关 / 链路类型可见性联动正常；不改动 `cesium-manager` 链路着色逻辑。
+
+**进度**：✅ 已完成 —— `packet-flow.js` 重写为 v4（脉冲渲染）：软发光 billboard（canvas 径向渐变贴图、按链路类型色单例缓存 `_glowCanvas`）替代 3px 硬边 `point`；缩放 + 透明度随行进相位周期搏动（CallbackProperty），端点淡入淡出；颜色取 `linkTypeColors`（isl/gsl/sul/ssl），尺寸随利用率增大；沿用 `maxPackets` 上限与按需 spawn/remove。新增 `setFilePath(nodes,color)` 文件脉冲——品红（#FF4DD8）发光体沿选中传输路径逐节点行进，复用脉冲风格，`ui-controller._applyFileHighlight` 选中/取消选中时驱动。`cesium-manager` 链路着色逻辑零改动。验证：包实体全部为 billboard（无 point 残留）、3 张链路类型辉光贴图缓存、文件脉冲生成/清除正确、帧率 120 FPS（远超 ≥30 验收）。
