@@ -33,7 +33,7 @@ except ImportError:
     sys.exit(1)
 
 # Protocol v3 Phase 2: packet-level discrete-event simulation engine
-from packet_sim import PacketEngine
+from packet_sim import PacketEngine, PRIO_HIGH, PRIO_BEST_EFFORT
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +603,7 @@ class DemoSimCore:
         gs_items = list(self.ground_stations.items())
         source_sink = {}
         flow_rate = {}
+        flow_prio = {}
         if gs_items:
             for uav in self.uavs:
                 up = positions.get(uav.id)
@@ -614,6 +615,7 @@ class DemoSimCore:
                                                 kv[1][0], kv[1][1]))
                 source_sink[uav.id] = nearest[0]
                 flow_rate[uav.id] = UAV_FLOW_RATE_PPS
+                flow_prio[uav.id] = PRIO_HIGH        # UAV telemetry/control
             for ship in self.ships:
                 shp = positions.get(ship.id)
                 if not shp:
@@ -624,7 +626,8 @@ class DemoSimCore:
                                                 kv[1][0], kv[1][1]))
                 source_sink[ship.id] = nearest[0]
                 flow_rate[ship.id] = SHIP_FLOW_RATE_PPS
-        self.engine.sync_flows(source_sink, flow_rate)
+                flow_prio[ship.id] = PRIO_BEST_EFFORT   # ship bulk data
+        self.engine.sync_flows(source_sink, flow_rate, flow_prio)
 
         # Time discontinuity (seek / stop / reset) => flush transient state.
         dt = self.sim_time - self._des_last_t
@@ -744,7 +747,11 @@ class DemoSimCore:
                     "traffic": "poisson",
                     "uav_rate_pps": UAV_FLOW_RATE_PPS,
                     "ship_rate_pps": SHIP_FLOW_RATE_PPS,
-                    "notes": "阶段2：自研DES存储转发，UAV/船→最近地面站Poisson流",
+                    "qos": {"uav": "high(0)", "ship": "best_effort(1)",
+                            "scheduling": "strict_priority",
+                            "drop_policy": "low_prio_first"},
+                    "handover_loss": True,
+                    "notes": "阶段3：差异化拓扑更新→真实切换丢包；分域QoS严格优先+低优先先丢",
                 },
             },
         }
@@ -845,8 +852,11 @@ class DemoSimCore:
                     "pkts_in_flight": summary["pkts_in_flight"],
                     "pkts_delivered": summary["pkts_delivered"],
                     "pkts_dropped": summary["pkts_dropped"],
+                    "pkts_handover_dropped": summary["pkts_handover_dropped"],
                     "avg_e2e_latency_ms": round(summary["avg_e2e_latency_ms"], 1),
                     "aggregate_throughput_bps": round(summary["aggregate_throughput_bps"], 1),
+                    # v3 Phase 3: per-priority QoS (0=high/UAV, 1=best-effort/ship)
+                    "qos": summary["qos"],
                 },
             },
         }

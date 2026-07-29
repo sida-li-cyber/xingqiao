@@ -1,5 +1,5 @@
 """
-Packet-Level Discrete-Event Simulation Engine (Protocol v3, Phase 2).
+Packet-Level Discrete-Event Simulation Engine (Protocol v3, Phase 2 + 3).
 
 A lightweight store-and-forward packet simulator that produces *real*
 network telemetry (per-link throughput / queue depth / latency / loss, and
@@ -18,8 +18,23 @@ Design
   tables, and forwards packets store-and-forward through per-port FIFO queues.
 - Routing is hop-by-hop (each node forwards toward the destination using a
   forwarding table), refreshed periodically and on topology change, so links
-  handing over naturally reroute traffic and occasionally drop in-flight
-  packets (realistic handover loss).
+  handing over naturally reroute traffic.
+
+Phase 3 additions
+-----------------
+- **Differential topology updates / real handover loss.** `sync_topology`
+  diffs the new edge set against the current one. Surviving links keep their
+  Link/Port objects (queues, in-flight transmission, byte counters) so traffic
+  is not disturbed when unrelated links come and go. Links that disappear are
+  drained: every queued packet and the packet in transmission is counted as a
+  *handover drop* (per-node, per-link and global counters, and the in-flight
+  tally are all updated). This is what produces the observable loss spike when
+  an uplink hands over to another satellite.
+- **QoS strict-priority scheduling.** Each packet carries a priority level
+  (`Packet.prio`, 0 = highest). Each output port holds one FIFO queue per
+  priority level and always serves the highest-priority non-empty queue first.
+  Under congestion, high-priority flows (e.g. UAV telemetry) therefore see
+  lower latency and fewer drops than best-effort flows (e.g. ship bulk data).
 
 The engine is geometry-free: propagation delays and capacities are handed in
 with the topology, keeping all Earth/space math in the caller.
@@ -38,12 +53,17 @@ ARR = 2   # a: node, b: packet
 
 _INF = float("inf")
 
+# QoS priority levels. 0 = highest (strict priority). Keep small.
+NUM_PRIO = 2
+PRIO_HIGH = 0      # e.g. UAV telemetry / control
+PRIO_BEST_EFFORT = 1   # e.g. ship bulk data
+
 
 class Packet:
     __slots__ = ("pid", "src", "dst", "size", "inject_time", "enq_time",
-                 "hops", "alive")
+                 "hops", "alive", "prio")
 
-    def __init__(self, pid, src, dst, size, inject_time):
+    def __init__(self, pid, src, dst, size, inject_time, prio=PRIO_BEST_EFFORT):
         self.pid = pid
         self.src = src
         self.dst = dst
@@ -52,6 +72,7 @@ class Packet:
         self.enq_time = inject_time  # when enqueued on current port
         self.hops = 0
         self.alive = False           # True once it has entered the network
+        self.prio = prio             # QoS priority level (0 = highest)
 
 
 class Link:
@@ -75,20 +96,51 @@ class Link:
 
 
 class Port:
-    """Output port for a directed link: FIFO queue + single transmitter."""
-    __slots__ = ("link", "queue", "in_tx", "busy_until")
+    """Output port for a directed link: per-priority FIFO queues + one transmitter.
+
+    Strict-priority scheduling: `pop_next()` always drains the lowest-numbered
+    (highest-priority) non-empty queue first.
+    """
+    __slots__ = ("link", "queues", "queued", "in_tx", "busy_until")
 
     def __init__(self, link):
         self.link = link
-        self.queue = deque()
+        self.queues = [deque() for _ in range(NUM_PRIO)]
+        self.queued = 0               # total packets across all priority queues
         self.in_tx = None             # packet currently transmitting
         self.busy_until = 0.0
+
+    def append(self, packet):
+        self.queues[packet.prio].append(packet)
+        self.queued += 1
+
+    def pop_next(self):
+        """Pop the highest-priority (lowest index) queued packet, or None."""
+        for q in self.queues:
+            if q:
+                self.queued -= 1
+                return q.popleft()
+        return None
+
+    def drain_all(self):
+        """Yield every queued packet (all priorities) and the in-tx packet,
+        resetting the port. Used to account handover drops on link removal."""
+        pkts = []
+        for q in self.queues:
+            while q:
+                pkts.append(q.popleft())
+        self.queued = 0
+        if self.in_tx is not None:
+            pkts.append(self.in_tx)
+            self.in_tx = None
+        return pkts
 
 
 DEFAULT_CONFIG = {
     "packet_size_bytes": 1500,
     "queue_capacity_pkts": 200,
     "default_rate_pps": 200.0,        # Poisson arrival rate per source
+    "default_prio": PRIO_BEST_EFFORT,  # priority when a flow has none set
     "route_refresh_interval": 5.0,    # seconds
     "link_error_rate": 0.0,           # per-packet corruption probability
     "max_in_flight": 100000,          # backpressure safety valve
@@ -122,6 +174,7 @@ class PacketEngine:
         self.route = defaultdict(dict)   # node -> {sink: next_hop}
         self.source_sink = {}            # source -> sink
         self.flow_rate = {}              # source -> pps
+        self.flow_prio = {}              # source -> priority level
         self.sources = []
         self.sinks = set()
         self._gen_scheduled = set()
@@ -138,10 +191,14 @@ class PacketEngine:
         self.in_flight = 0
         self.total_delivered = 0
         self.total_dropped = 0
+        self.total_handover_dropped = 0
         self.n_generated = defaultdict(int)
         self.n_delivered = defaultdict(int)
         self.n_forwarded = defaultdict(int)
         self.n_dropped = defaultdict(int)
+        self.n_generated_prio = [0] * NUM_PRIO   # cumulative generated per priority
+        self.n_dropped_prio = [0] * NUM_PRIO     # cumulative drops per priority
+        self.n_delivered_prio = [0] * NUM_PRIO   # cumulative deliveries per priority
         self.e2e_samples = []                 # windowed, seconds
         self.node_e2e = defaultdict(list)     # windowed, seconds
 
@@ -167,58 +224,94 @@ class PacketEngine:
     # ------------------------------------------------------------------
 
     def sync_topology(self, nodes, edges):
-        """Update the directed graph.
+        """Differentially update the directed graph.
 
         nodes: iterable of node ids.
         edges: iterable of (a, b, link_type, prop_s) undirected links.
+
+        Surviving directed links keep their Link/Port state (queues, in-tx
+        packet, byte counters). Removed links are drained and every packet they
+        held is counted as a handover drop. Added links get fresh Link/Port
+        objects. This keeps traffic on stable links undisturbed while producing
+        a real, observable loss spike when a link hands over.
         """
         self.nodes = set(nodes)
-        new_sig = frozenset(
-            (a, b) if a < b else (b, a) for a, b, _, _ in edges
-        )
-
-        old_links = self.links
-        changed = new_sig != self._edge_sig
-        if changed:
-            self.links = {}
-            self.ports = {}
-            self._edge_sig = new_sig
-            self._topo_dirty = True
-
         cap_by_type = self.cfg["capacity"]
+
+        # Normalise undirected edges into directed (u, v) specs.
+        new_specs = {}
         for a, b, ltype, prop_s in edges:
             cap = cap_by_type.get(ltype, 1e9)
-            undir = frozenset((a, b))
             for u, v in ((a, b), (b, a)):
-                key = (u, v)
+                new_specs[(u, v)] = (cap, prop_s)
+
+        new_sig = frozenset(new_specs.keys())
+        if new_sig == self._edge_sig:
+            # Edge set unchanged: just refresh per-link propagation/capacity.
+            for key, (cap, prop_s) in new_specs.items():
                 lk = self.links.get(key)
-                if lk is None:
-                    lk = Link(u, v, undir, cap, prop_s)
-                    prev = old_links.get(key)
-                    if prev is not None:
-                        lk.bytes_tx = prev.bytes_tx  # rate continuity
-                    self.links[key] = lk
-                    self.ports[key] = Port(lk)
-                else:
+                if lk is not None:
                     lk.prop_s = prop_s
                     lk.capacity_bps = cap
+            return
 
-        # Rebuild forward adjacency only when the edge set changed. Routing
-        # consumes adj at refresh time, which coincides with _topo_dirty, so a
-        # changed topology always gets a fresh adj; an unchanged one reuses it.
-        if changed:
-            self.adj = defaultdict(list)
-            for (u, v), lk in self.links.items():
-                self.adj[u].append((v, lk.prop_s))
+        old_keys = set(self.links.keys())
+        new_keys = set(new_specs.keys())
+        removed = old_keys - new_keys
+        added = new_keys - old_keys
 
-    def sync_flows(self, source_sink, flow_rate=None):
-        """Declare traffic sources, their sinks, and per-source rates."""
+        # --- Removed links: drain queues + in-tx, count handover drops ---
+        for key in removed:
+            port = self.ports.get(key)
+            lk = self.links.get(key)
+            if port is not None:
+                for pkt in port.drain_all():
+                    if lk is not None:
+                        lk.drops += 1
+                    self.n_dropped[pkt.src] += 1
+                    self.n_dropped_prio[pkt.prio] += 1
+                    self.total_dropped += 1
+                    self.total_handover_dropped += 1
+                    if pkt.alive:
+                        self.in_flight -= 1
+                        pkt.alive = False
+            self.links.pop(key, None)
+            self.ports.pop(key, None)
+
+        # --- Surviving links: refresh parameters, keep state ---
+        for key in (old_keys & new_keys):
+            cap, prop_s = new_specs[key]
+            lk = self.links[key]
+            lk.prop_s = prop_s
+            lk.capacity_bps = cap
+
+        # --- Added links: fresh Link + Port ---
+        for key in added:
+            cap, prop_s = new_specs[key]
+            u, v = key
+            lk = Link(u, v, frozenset((u, v)), cap, prop_s)
+            self.links[key] = lk
+            self.ports[key] = Port(lk)
+
+        self._edge_sig = new_sig
+        self._topo_dirty = True
+
+        # Rebuild forward adjacency to match the new edge set.
+        self.adj = defaultdict(list)
+        for (u, v), lk in self.links.items():
+            self.adj[u].append((v, lk.prop_s))
+
+    def sync_flows(self, source_sink, flow_rate=None, flow_prio=None):
+        """Declare traffic sources, their sinks, per-source rates and priority."""
         self.source_sink = dict(source_sink)
         self.sources = list(source_sink.keys())
         self.sinks = set(source_sink.values())
         if flow_rate is None:
             flow_rate = {s: self.cfg["default_rate_pps"] for s in self.sources}
         self.flow_rate = dict(flow_rate)
+        if flow_prio is None:
+            flow_prio = {s: self.cfg["default_prio"] for s in self.sources}
+        self.flow_prio = dict(flow_prio)
 
         for s in self.sources:
             if s not in self._gen_scheduled and self.flow_rate.get(s, 0) > 0:
@@ -305,13 +398,16 @@ class PacketEngine:
             return  # backpressure: skip this injection
 
         self._pid += 1
+        prio = self.flow_prio.get(source, self.cfg["default_prio"])
         pkt = Packet(self._pid, source, dst,
-                     self.cfg["packet_size_bytes"], t)
+                     self.cfg["packet_size_bytes"], t, prio)
         self.n_generated[source] += 1
+        self.n_generated_prio[prio] += 1
 
         nh = self.route.get(source, {}).get(dst)
         if nh is None:
             self.n_dropped[source] += 1
+            self.n_dropped_prio[prio] += 1
             self.total_dropped += 1
             return
         self._enqueue(source, nh, pkt, t)
@@ -322,19 +418,49 @@ class PacketEngine:
         if link is not None:
             link.attempts += 1
 
-        # Drop: link gone or queue overflow
-        if port is None or len(port.queue) >= self.cfg["queue_capacity_pkts"]:
+        # Drop: link gone
+        if port is None:
             self.n_dropped[u] += 1
+            self.n_dropped_prio[packet.prio] += 1
             self.total_dropped += 1
-            if link is not None:
-                link.drops += 1
             if packet.alive:
                 self.in_flight -= 1
                 packet.alive = False
             return
 
+        # Buffer full: apply the drop policy. A high-priority packet pushes out
+        # the lowest-priority queued packet (protecting priority traffic under
+        # congestion); otherwise the arriving packet is tail-dropped.
+        if port.queued >= self.cfg["queue_capacity_pkts"]:
+            victim = None
+            if packet.prio == PRIO_HIGH:
+                for q in reversed(port.queues):
+                    if q:
+                        victim = q.pop()
+                        port.queued -= 1
+                        break
+            if victim is None:
+                self.n_dropped[u] += 1
+                self.n_dropped_prio[packet.prio] += 1
+                self.total_dropped += 1
+                if link is not None:
+                    link.drops += 1
+                if packet.alive:
+                    self.in_flight -= 1
+                    packet.alive = False
+                return
+            # Account the pushed-out (lower-priority) packet as the drop.
+            self.n_dropped[u] += 1
+            self.n_dropped_prio[victim.prio] += 1
+            self.total_dropped += 1
+            if link is not None:
+                link.drops += 1
+            if victim.alive:
+                self.in_flight -= 1
+                victim.alive = False
+
         packet.enq_time = t
-        port.queue.append(packet)
+        port.append(packet)
         if not packet.alive:
             packet.alive = True
             self.in_flight += 1
@@ -343,7 +469,9 @@ class PacketEngine:
             self._start_tx(port, t)
 
     def _start_tx(self, port, t):
-        packet = port.queue.popleft()
+        packet = port.pop_next()
+        if packet is None:
+            return
         port.in_tx = packet
         link = port.link
 
@@ -371,6 +499,7 @@ class PacketEngine:
         if err > 0 and self.rng.random() < err:
             # Corrupted in transit
             self.n_dropped[u] += 1
+            self.n_dropped_prio[packet.prio] += 1
             self.total_dropped += 1
             link.drops += 1
             if packet.alive:
@@ -379,30 +508,35 @@ class PacketEngine:
         else:
             self._push(t + link.prop_s, ARR, v, packet)
 
-        if port.queue:
+        if port.queued:
             self._start_tx(port, t)
 
     def _on_arrive(self, node, packet, t):
+        # Guard against stale events for packets already dropped (e.g. a link
+        # handed over while this packet's propagation event was still pending).
+        if not packet.alive:
+            return
+
         if node == packet.dst:
             self.n_delivered[node] += 1
+            self.n_delivered_prio[packet.prio] += 1
             self.total_delivered += 1
             e2e = t - packet.inject_time
             self.e2e_samples.append(e2e)
             self.node_e2e[packet.src].append(e2e)
             self.node_e2e[node].append(e2e)
-            if packet.alive:
-                self.in_flight -= 1
-                packet.alive = False
+            self.in_flight -= 1
+            packet.alive = False
             return
 
         self.n_forwarded[node] += 1
         nh = self.route.get(node, {}).get(packet.dst)
         if nh is None:
             self.n_dropped[node] += 1
+            self.n_dropped_prio[packet.prio] += 1
             self.total_dropped += 1
-            if packet.alive:
-                self.in_flight -= 1
-                packet.alive = False
+            self.in_flight -= 1
+            packet.alive = False
             return
         self._enqueue(node, nh, packet, t)
 
@@ -435,7 +569,7 @@ class PacketEngine:
             for d in dirs:
                 p = self.ports.get((d.u, d.v))
                 if p is not None:
-                    qd += len(p.queue) + (1 if p.in_tx is not None else 0)
+                    qd += p.queued + (1 if p.in_tx is not None else 0)
 
             lat_cnt = sum(d.lat_cnt for d in dirs)
             lat_sum = sum(d.lat_sum for d in dirs)
@@ -497,8 +631,17 @@ class PacketEngine:
             "pkts_in_flight": self.in_flight,
             "pkts_delivered": self.total_delivered,
             "pkts_dropped": self.total_dropped,
+            "pkts_handover_dropped": self.total_handover_dropped,
             "avg_e2e_latency_ms": avg_e2e,
             "aggregate_throughput_bps": agg_throughput,
+            "qos": {
+                str(p): {
+                    "generated": self.n_generated_prio[p],
+                    "delivered": self.n_delivered_prio[p],
+                    "dropped": self.n_dropped_prio[p],
+                }
+                for p in range(NUM_PRIO)
+            },
         }
         self.e2e_samples = []
 
