@@ -104,6 +104,10 @@
 | `filter` | `{"satellites": [...], "stations": [...]}` | 筛选显示节点 |
 | `scenario` | `{"scenario": "weather"}` | 切换仿真场景 |
 | `switch_constellation` | `{"constellation": "Kuiper", "shell": 0}` | 切换星座和壳层 |
+| `file_send` | `{"file_id": "…", "src": "UAV-01", "dst": "Beijing", "prio": 1, "rate_bps": 5000000}` | 触发已上传文件的仿真传输（`file_id` 须先经 `/api/files/upload` 上传） |
+| `file_cancel` | `{"file_id": "…"}` | 取消传输 |
+
+> 文件传输的完整数据面（HTTP 上传 / 下载 / SHA-256 校验）与遥测字段见 [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md)。
 
 ### 2.5 支持的仿真场景
 
@@ -329,6 +333,22 @@ python demo.py
 ### 6.7 运行原始 Hypatia 离线仿真
 
 参考 `hypatia-master/paper/README.md` 中的论文复现步骤。
+
+### 6.8 自定义文件传输（v3.2）
+
+把任意文件"放进"仿真网络，从无人机 / 船舶传至地面站，到达后下载还原（SHA-256 逐字节校验）。
+
+**方式一：前端面板**——打开页面右侧「文件传输」面板，选择文件、源节点（UAV / 船）、目的端（地面站）、优先级与速率上限，点「上传并发送」。下方追踪器实时显示进度 / 吞吐 / ETA / 重传 / 状态，选中条目可在三维地球上高亮其传输路径；完成后点「下载」。
+
+**方式二：命令行客户端**（无需前端）：
+
+```bash
+python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 5000000 --port 8000
+```
+
+它自动完成 上传 → `file_send` → 实时进度 → 下载 → SHA-256 校验，末行打印 `[OK]` / `[FAIL]`。
+
+> 提示：若仿真已跑到 `duration` 上限自动暂停，`file_send` 会自动延长仿真时长并恢复播放，传输不会卡死；seek / stop / reset 等时间跳变会中断在途传输（后端标记为 `CANCELLED`）。详见 [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md)。
 
 ---
 

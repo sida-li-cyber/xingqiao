@@ -24,6 +24,8 @@ This repository is an enhanced fork of the [Hypatia](https://github.com/snkas/hy
 - [realtime_backend/QUICKSTART.md](realtime_backend/QUICKSTART.md) — 后端快速入门（中文）
 - [hypatia-master/satviz/FRONTEND_README.md](hypatia-master/satviz/FRONTEND_README.md) — 前端详细文档（中文）
 - [docs/phase6-validation.md](docs/phase6-validation.md) — 阶段 6 性能 / 正确性校验报告（对账理论值、压测、断线重连）
+- [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md) — 文件传输协议规范 v3.2（HTTP 数据面 + WS 命令 + `file_transfers` 遥测）
+- [docs/file-transfer-design.md](docs/file-transfer-design.md) — 自定义文件传输与实时追踪设计文档（控制面 / 数据面分离）
 - [ROADMAP.md](ROADMAP.md) — 系统完善路线图（六阶段，已全部完成）
 
 ## Testing / Validation
@@ -35,8 +37,18 @@ cd hypatia-master/satviz
 python test_packet_sim.py            # DES 单元校验：轻载时延对账、拥塞排队/丢包
 python test_phase3.py                # 切换丢包尖峰对账、QoS 严格优先
 python test_phase6.py                # 阶段 6：守恒/吞吐/M-D-1 对账 + 长时与背压压测（--fast 跳过两个长时测试）
+python test_phase8.py                # 文件传输控制面：分片注入/ARQ重传/多文件QoS + 包守恒（含重传场景）
 python test_integration_offline.py   # 全管线离线集成（真实 DemoSimCore，无需后端）
 python test_reconnect.py             # 断线重连健壮性（自动起停 backend + sim_core 子进程，约 40s）
+
+cd ../..                             # 回到项目根目录
+python tests/test_file_e2e.py        # 文件传输端到端：上传→传输→下载 SHA-256 一致 + 取消（自起 backend+core，端口 8769）
+```
+
+**文件传输命令行客户端**（无需前端即可上传 / 传输 / 下载校验）：
+
+```bash
+python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 5000000 --port 8000
 ```
 
 ## License

@@ -926,7 +926,7 @@ class DemoSimCore:
         return {
             "message_type": "simulation_init",
             "payload": {
-                "version": "3.1",
+                "version": "3.2",
                 "duration": self.duration,
                 "update_rate_hz": 5,
                 "nodes": nodes,
