@@ -395,11 +395,21 @@ class UIController {
 
         const el = document.getElementById('metricsSummary');
         if (el) {
+            const delivered = Number(summary.pkts_delivered || 0).toLocaleString();
+            const dropped = Number(summary.pkts_dropped || 0).toLocaleString();
+            const inFlight = Number(summary.pkts_in_flight || 0).toLocaleString();
+            const e2e = Number(summary.avg_e2e_latency_ms || 0).toFixed(1);
+            const thr = this.fmtBps(summary.aggregate_throughput_bps || 0);
             el.innerHTML =
                 `活跃链路 <b style="color:var(--text)">${summary.active_links}</b> · ` +
                 `节点 <b style="color:var(--text)">${summary.total_nodes}</b><br>` +
                 `平均利用率 <b style="color:var(--text)">${(summary.avg_utilization * 100).toFixed(1)}%</b> · ` +
-                `最大时延 <b style="color:var(--text)">${summary.max_latency_ms}ms</b>`;
+                `最大时延 <b style="color:var(--text)">${summary.max_latency_ms}ms</b><br>` +
+                `送达 <b style="color:var(--text)">${delivered}</b> · ` +
+                `丢包 <b style="color:var(--text)">${dropped}</b> · ` +
+                `在途 <b style="color:var(--text)">${inFlight}</b><br>` +
+                `端到端 <b style="color:var(--text)">${e2e}ms</b> · ` +
+                `吞吐 <b style="color:var(--text)">${thr}</b>`;
         }
     }
 
