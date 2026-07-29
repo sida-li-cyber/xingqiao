@@ -14,6 +14,7 @@ class CesiumManager {
         this.entities = {
             nodes: new Map(),   // nodeId -> Cesium entity (all types)
             links: new Map(),   // linkId -> Cesium entity
+            islMesh: [],        // Phase 7: static ISL mesh (decorative)
         };
 
         // Node type metadata
@@ -184,7 +185,7 @@ class CesiumManager {
                 const ptype = picked.id.properties && picked.id.properties.type
                     ? picked.id.properties.type.getValue()
                     : null;
-                if (ptype === 'packet') {
+                if (ptype === 'packet' || ptype === 'isl_mesh') {
                     this.selectEntity(null);
                 } else {
                     this.selectEntity(picked.id);
@@ -722,6 +723,58 @@ class CesiumManager {
         }
     }
 
+    /**
+     * Phase 7 / protocol 3.1: draw the static ISL mesh announced once in
+     * simulation_init (`isl_topology`). Decorative only — faint solid lines
+     * that follow the live satellite entities; not pickable, no metrics.
+     *
+     * Used for small constellations (<= ~200 sats) where drawing all 2N
+     * links is cheap. At thousand-satellite scale the caller passes null and
+     * ISLs appear only while carrying traffic (via syncLinks), so idle links
+     * cost nothing.
+     *
+     * Must be called AFTER the satellite node entities exist (i.e. after the
+     * first state_update has positioned them).
+     *
+     * @param {Array<[string,string]>|null} pairs - ISL endpoint pairs.
+     */
+    setStaticISLMesh(pairs) {
+        for (const ent of this.entities.islMesh) {
+            this.viewer.entities.remove(ent);
+        }
+        this.entities.islMesh = [];
+        if (!pairs || !pairs.length) return;
+
+        const base = this.linkTypeColors.isl || Cesium.Color.CYAN;
+        const color = base.withAlpha(0.16);
+        const show = this.linkTypeVisibility.isl !== false;
+        const clock = this.viewer.clock;
+
+        for (const pair of pairs) {
+            const a = this.entities.nodes.get(pair[0]);
+            const b = this.entities.nodes.get(pair[1]);
+            if (!a || !b) continue;
+            const ent = this.viewer.entities.add({
+                polyline: {
+                    positions: new Cesium.CallbackProperty(() => {
+                        const pa = a.position
+                            ? a.position.getValue(clock.currentTime) : null;
+                        const pb = b.position
+                            ? b.position.getValue(clock.currentTime) : null;
+                        if (!pa || !pb) return [];
+                        return [pa, pb];
+                    }, false),
+                    width: 1,
+                    material: color,
+                    clampToGround: false,
+                },
+                properties: { type: 'isl_mesh' },
+                show: show,
+            });
+            this.entities.islMesh.push(ent);
+        }
+    }
+
     // ======================================================================
     // Link Visual Helpers
     // ======================================================================
@@ -833,6 +886,12 @@ class CesiumManager {
             if (link.properties.linkType &&
                 link.properties.linkType.getValue() === linkType) {
                 link.show = visible;
+            }
+        }
+        // The static ISL mesh belongs to the 'isl' layer too.
+        if (linkType === 'isl') {
+            for (const ent of this.entities.islMesh) {
+                ent.show = visible;
             }
         }
     }
@@ -1017,6 +1076,7 @@ class CesiumManager {
         this.viewer.entities.removeAll();
         this.entities.nodes.clear();
         this.entities.links.clear();
+        this.entities.islMesh = [];
         this.nodeInterp.clear();
         this._highlightedLinks.clear();
         this._linkColorCache.clear();

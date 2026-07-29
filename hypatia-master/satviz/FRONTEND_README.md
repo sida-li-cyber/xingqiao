@@ -137,6 +137,43 @@ satviz/
 }
 ```
 
+#### 协议 3.1 — 千星级紧凑帧（阶段7）
+
+为支持 440 / 1584 星预设（稳态单帧 < 100 KB），`simulation_init` 与
+`state_update` 在 v3 基础上做了紧凑化（向后兼容的增量字段，旧字段语义不变）：
+
+`simulation_init.payload` 新增：
+- `sat_order`: 卫星 ID 数组，state 帧的 `sat_pos` 按此顺序对齐；
+- `isl_topology`: 静态星间链路 `[ [idA, idB], ... ]`，前端可一次性绘出网格；
+- `version`: `"3.1"`。
+
+`state_update.payload` 紧凑化：
+```json
+{
+  "timestamp": 123.4,
+  "sat_pos": [[45.012, 120.334], ...],   // 按 sat_order 对齐，仅 lat/lon（高度恒定，取自 init 的 orbit.altitude_km）
+  "positions": { "UAV-01": {"lat":..,"lon":..,"alt":..,"heading":..} },  // 仅动态节点（UAV/船）
+  "links": { "Beijing--Sat-3-1": {"t":"gsl","u":0.0,"l":3.1,"d":0.0,"tx":0.0,"q":0,"p":3.1} },
+  "links_removed": ["Sat-0-1--Sat-0-2"],  // 本帧消失的链路 key
+  "links_full": false,                     // true = 全量重同步帧（每 25 tick 一次，首帧必为 true）
+  "node_metrics": { "UAV-01": {...} },     // 仅本窗口有收/发/转发/丢包活动的节点
+  "metrics_summary": { ... }
+}
+```
+
+链路短键对照：`t`=类型，`u`=带宽利用率，`l`=时延(ms)，`d`=丢包率，
+`tx`=吞吐(bps)，`q`=队列深度，`p`=传播时延(ms)。`capacity_bps` 由 init 的
+`link_types[t].capacity_bps` 提供；空闲 ISL 不出现在 `links` 中（零开销）。
+
+前端重构（`app.js` 归一化层，CesiumManager / UIController 无需感知短键）：
+- `_rebuildPositions`: 由 `sat_pos` + `sat_order` + 恒定高度还原全量位置；
+- `_mergeLinks` / `_expandLink`: 将短键 delta 合并进客户端 `linkCache`
+  （`links_full` 重置、`links_removed` 剪枝），再展开为长格式交给 `syncLinks`；
+- 小规模星座（≤200 星）在首帧后用 `isl_topology` 绘制静态 ISL 网格
+  （`CesiumManager.setStaticISLMesh`，装饰性、不可拾取）；千星级仅渲染有流量的链路。
+
+---
+
 ### 客户端发送命令
 
 | 命令 | action | params |
@@ -180,9 +217,11 @@ satviz/
 
 ## 已知问题
 
-1. **大数据集**: 超过 1000 个卫星或 10000 条链路时性能会下降
+1. **大数据集**: 阶段7 后已支持 1584 星预设（协议 3.1 紧凑帧 + 空闲链路零开销，
+   核心 ≥30 ticks/s、稳态单帧 <50 KB）；更大规模需进一步削减可视化实体
 2. **Cesium Token**: 未配置时默认使用 NaturalEarthII 底图（无需token也能运行）
 3. **离线CZML**: 需要预先用 `scripts/extractor.py` 生成CZML文件
+4. **CesiumJS CDN**: Cesium 从 cesium.com 加载，需联网（内网部署注意代理放行）
 
 ---
 
@@ -204,6 +243,7 @@ cd hypatia-master/satviz
 python test_packet_sim.py            # DES 单元校验：轻载时延对账、拥塞排队/丢包
 python test_phase3.py                # 切换丢包尖峰对账、QoS 严格优先
 python test_phase6.py                # 守恒/吞吐/M-D-1 对账 + 长时与背压压测（--fast 跳过两个长时测试）
+python test_phase7.py                # 千星级：生成健全性/网格等价/协议3.1结构/440 压测（--long 加 1584/600s）
 python test_integration_offline.py   # 全管线离线集成（真实 DemoSimCore，无需后端）
 python test_reconnect.py             # 断线重连健壮性（自动起停 backend + sim_core 子进程）
 ```
@@ -219,6 +259,17 @@ python test_reconnect.py             # 断线重连健壮性（自动起停 back
 ---
 
 ## 版本历史
+
+### v3.1 (Thousand-Satellite Scale / 阶段7)
+- 千星级规模：多壳层 Walker-δ 生成器 + `--scale 72|440|1584` 预设
+  （72 与旧版几何逐字节一致；ID 方案 `Sat-{plane}-{idx}`，多壳层 `Sat-{shell}-{plane}-{idx}`）
+- 协议 3.1 紧凑帧：`sat_pos` 对齐数组 + 链路短键 delta（`links_removed` /
+  `links_full`）+ 窗口活跃节点，1584 星稳态单帧 < 50 KB
+- 核心性能：空间网格可见性预筛 + 1Hz 拓扑节流 + ISL 传播缓存 + 快照分组预计算，
+  1584 星 ≥ 30 ticks/s（目标 ≥ 20）
+- 前端归一化层（app.js）：短键展开 + delta 合并 + 小规模星座静态 ISL 网格 +
+  空闲链路零开销；CesiumManager / UIController / 包流动动画无需改动
+- 新增 `test_phase7.py`（生成健全性 / 网格等价性 / 协议结构 / 440 与 --long 1584 压测）
 
 ### v3.0 (Packet-Level)
 - 包级仿真：指标全部由自研 DES (`packet_sim.py`) 中真实数据包涌现

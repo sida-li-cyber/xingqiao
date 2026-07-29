@@ -44,9 +44,14 @@ EARTH_RADIUS_KM = 6371.0
 EARTH_MU = 398600.4418  # km^3/s^2
 EARTH_ROTATION_RATE = 360.0 / 86400.0  # deg/s
 
-# GSL: distance thresholds (km) with hysteresis
-GSL_CONNECT_RANGE = 2000.0
-GSL_DISCONNECT_RANGE = 2200.0
+# GSL: each ground station keeps feeder links to its K nearest *visible*
+# satellites (10 deg elevation mask ~= 2060 km footprint at 550 km altitude,
+# close to the historical 2000 km connect threshold). Capping fan-in forces
+# traffic to traverse the ISL mesh toward a feeder satellite instead of
+# always taking a two-hop direct downlink, and keeps the GSL count (and the
+# state frame) small at thousand-satellite scale.
+GSL_MAX_LINKS = 4          # feeder links per ground station
+GSL_MIN_ELEV_DEG = 10.0    # minimum satellite elevation for a feeder link
 
 # SUL / SSL: each UAV / ship uplinks to its K nearest *visible* satellites.
 # A satellite is "visible" when it sits above a minimum elevation angle
@@ -70,17 +75,35 @@ LINK_CAPACITY_BPS = {
     "sul": 5e8,    # 500 Mbps UAV uplink
     "ssl": 5e8,    # 500 Mbps ship uplink
 }
-PACKET_SIZE_BYTES = 1500       # single packet size
 PACKET_QUEUE_CAPACITY = 200    # per-output-port queue depth (packets)
 
 # --- Protocol v3 Phase 2: DES traffic model (Poisson sources) ---
 # UAVs and ships generate packets that are routed (hop-by-hop, store-and-
-# forward) through the constellation to their nearest ground station. Rates
-# are tuned so uplink utilization is visible (~30% SUL / ~18% SSL) while
-# staying well below capacity, i.e. an uncongested, healthy network.
-UAV_FLOW_RATE_PPS = 2500.0     # packets/sec generated per UAV (~30% of SUL)
-SHIP_FLOW_RATE_PPS = 1500.0    # packets/sec generated per ship (~18% of SSL)
+# forward) through the constellation to the nearest ground station.
+# Phase 7 tuning: packets are aggregated 6000-byte units at lower per-source
+# rates. Multi-hop ISL paths multiply the event volume per packet, so the
+# lower pps keeps the DES affordable at thousand-satellite scale while the
+# larger packets preserve visible utilization (~9.6% SUL / ~5.8% SSL).
+PACKET_SIZE_BYTES = 6000       # aggregated packet size
+UAV_FLOW_RATE_PPS = 1000.0     # packets/sec generated per UAV
+SHIP_FLOW_RATE_PPS = 600.0     # packets/sec generated per ship
 MAX_DES_STEP = 2.0             # larger sim-time jump => flush DES state
+
+# --- Phase 7: thousand-satellite scale presets (single Walker-delta shells) ---
+# 72   = legacy demo constellation (6 planes x 12, staggered), the default.
+# 440  = 20 planes x 22, a medium-density shell.
+# 1584 = Starlink Gen1 shell 1 (72 planes x 22 @ 550 km / 53 deg).
+# Single-shell IDs stay "Sat-{plane}-{idx}" (backward compatible); only
+# genuinely multi-shell constellations use "Sat-{shell}-{plane}-{idx}".
+SCALE_PRESETS = {
+    72: {"planes": 6, "sats_per_plane": 12,
+         "altitude_km": 550.0, "inclination_deg": 53.0,
+         "legacy_stagger": True},
+    440: {"planes": 20, "sats_per_plane": 22,
+          "altitude_km": 550.0, "inclination_deg": 53.0},
+    1584: {"planes": 72, "sats_per_plane": 22,
+           "altitude_km": 550.0, "inclination_deg": 53.0},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -118,11 +141,20 @@ def satellite_elevation_deg(obs_lat, obs_lon, sat_lat, sat_lon, sat_alt_km):
     return math.degrees(math.atan2(math.cos(lam) - rho, math.sin(lam)))
 
 
-def visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg):
+def visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg,
+                       candidates=None):
     """Return [(sat_id, ground_dist_km)] for satellites above min_elev_deg,
-    sorted nearest-first."""
+    sorted nearest-first.
+
+    candidates: optional iterable of sat IDs to restrict the search to
+    (Phase 7 spatial-grid prefilter); defaults to all of sat_pos.
+    """
+    ids = candidates if candidates is not None else sat_pos.keys()
     out = []
-    for sat_id, sp in sat_pos.items():
+    for sat_id in ids:
+        sp = sat_pos.get(sat_id)
+        if sp is None:
+            continue
         sat_alt_km = sp.get("alt", 550000.0) / 1000.0
         el = satellite_elevation_deg(obs_lat, obs_lon,
                                      sp["lat"], sp["lon"], sat_alt_km)
@@ -130,6 +162,49 @@ def visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg):
             out.append((sat_id,
                         haversine_km(obs_lat, obs_lon, sp["lat"], sp["lon"])))
     out.sort(key=lambda x: x[1])
+    return out
+
+
+# --- Phase 7: spatial grid prefilter for thousand-satellite constellations ---
+# Buckets satellites into 10 deg x 10 deg lat/lon cells so visibility and
+# ground-station queries only examine nearby satellites. A margin of 3 cells
+# (30 deg) covers both the ~20 deg visibility cone at 550 km / 5 deg elevation
+# mask and the 2200 km GSL disconnect range.
+GRID_CELL_DEG = 10.0
+GRID_MARGIN_CELLS = 3
+
+
+def _grid_key(lat, lon):
+    return (int(math.floor(lat / GRID_CELL_DEG)),
+            int(math.floor(lon / GRID_CELL_DEG)))
+
+
+def build_sat_grid(sat_pos):
+    """Bucket satellite positions into 10 deg lat/lon cells."""
+    grid = {}
+    for sid, sp in sat_pos.items():
+        key = _grid_key(sp["lat"], sp["lon"])
+        grid.setdefault(key, []).append(sid)
+    return grid
+
+
+def grid_candidates(grid, lat, lon, margin=GRID_MARGIN_CELLS):
+    """Satellite IDs in cells within `margin` cells of (lat, lon).
+
+    Longitude cells wrap around the antimeridian; latitude cells clamp at
+    the poles.
+    """
+    ci, cj = _grid_key(lat, lon)
+    out = []
+    for di in range(-margin, margin + 1):
+        ii = ci + di
+        if ii < -9 or ii > 8:          # latitude range [-90, 90)
+            continue
+        for dj in range(-margin, margin + 1):
+            jj = ((cj + dj + 18) % 36) - 18   # longitude wrap [-180, 180)
+            cell = grid.get((ii, jj))
+            if cell:
+                out.extend(cell)
     return out
 
 
@@ -161,8 +236,13 @@ class Satellite:
     """Circular orbit propagation (unchanged from v1)."""
 
     def __init__(self, sat_id, altitude_km, inclination_deg, raan_deg,
-                 mean_anomaly_deg):
+                 mean_anomaly_deg, shell=0, plane=0, idx=0):
         self.id = sat_id
+        # Structured constellation coordinates (Phase 7): topology is built
+        # from these instead of parsing the ID string.
+        self.shell = shell
+        self.plane = plane
+        self.idx = idx
         self.altitude_km = altitude_km
         self.inclination_rad = math.radians(inclination_deg)
         self.raan_rad = math.radians(raan_deg)
@@ -192,18 +272,63 @@ class Satellite:
 
 
 def create_constellation(num_orbits=6, sats_per_orbit=12,
-                         altitude_km=550.0, inclination_deg=53.0):
+                         altitude_km=550.0, inclination_deg=53.0,
+                         shells=None):
+    """Create satellites from a list of Walker-delta shells.
+
+    shells: optional list of shell specs (dicts) with keys
+        planes, sats_per_plane, altitude_km, inclination_deg,
+        phase_factor (Walker F, default planes // 2),
+        raan_offset (deg, default 0),
+        legacy_stagger (bool: reproduce the original v3 geometry).
+    When omitted, a single legacy shell is built from num_orbits /
+    sats_per_orbit so the default 72-sat constellation is identical to v3.
+
+    IDs: a single shell keeps the backward-compatible "Sat-{plane}-{idx}";
+    multiple shells use "Sat-{shell}-{plane}-{idx}".
+    """
+    if shells is None:
+        shells = [{
+            "planes": num_orbits,
+            "sats_per_plane": sats_per_orbit,
+            "altitude_km": altitude_km,
+            "inclination_deg": inclination_deg,
+            "legacy_stagger": True,
+        }]
+
+    multi = len(shells) > 1
     satellites = []
-    for orb in range(num_orbits):
-        raan = orb * 180.0 / num_orbits
-        for idx in range(sats_per_orbit):
-            sat_id = f"Sat-{orb}-{idx}"
-            ma = idx * 360.0 / sats_per_orbit
-            if orb % 2 == 1:
-                ma += 180.0 / sats_per_orbit
-            satellites.append(Satellite(
-                sat_id, altitude_km, inclination_deg, raan, ma
-            ))
+    for sh, spec in enumerate(shells):
+        planes = spec["planes"]
+        spp = spec["sats_per_plane"]
+        alt = spec.get("altitude_km", 550.0)
+        inc = spec.get("inclination_deg", 53.0)
+        raan0 = spec.get("raan_offset", 0.0)
+        phase_factor = spec.get("phase_factor", planes // 2)
+        legacy = spec.get("legacy_stagger", False)
+
+        for plane in range(planes):
+            if legacy:
+                raan = plane * 180.0 / planes       # original v3 layout
+            else:
+                raan = raan0 + plane * 360.0 / planes
+            for idx in range(spp):
+                if legacy:
+                    ma = idx * 360.0 / spp
+                    if plane % 2 == 1:
+                        ma += 180.0 / spp
+                else:
+                    # Walker-delta inter-plane phasing: F * 360 / (P * S)
+                    ma = idx * 360.0 / spp + \
+                        plane * phase_factor * 360.0 / (planes * spp)
+                if multi:
+                    sat_id = f"Sat-{sh}-{plane}-{idx}"
+                else:
+                    sat_id = f"Sat-{plane}-{idx}"
+                satellites.append(Satellite(
+                    sat_id, alt, inc, raan, ma,
+                    shell=sh, plane=plane, idx=idx,
+                ))
     return satellites
 
 
@@ -416,13 +541,28 @@ class DemoSimCore:
     """Multi-domain simulation core streaming v2 protocol."""
 
     def __init__(self, host="localhost", port=8000, num_orbits=6,
-                 sats_per_orbit=12, num_uavs=8, num_ships=10):
+                 sats_per_orbit=12, num_uavs=8, num_ships=10,
+                 scale=None):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
 
+        # Phase 7: --scale picks a preset shell list; otherwise the legacy
+        # single-shell generator (identical geometry to v3) is used.
+        if scale is not None:
+            if scale not in SCALE_PRESETS:
+                raise ValueError(
+                    f"Unknown scale preset {scale}; "
+                    f"choose from {sorted(SCALE_PRESETS)}")
+            self._shells = [dict(SCALE_PRESETS[scale])]
+            self.scale = scale
+        else:
+            self._shells = None
+            self.scale = num_orbits * sats_per_orbit
+
         # Create entities
-        self.satellites = create_constellation(num_orbits, sats_per_orbit)
+        self.satellites = create_constellation(
+            num_orbits, sats_per_orbit, shells=self._shells)
         self.uavs = create_uav_formation(num_uavs)
         self.ships = create_ships(num_ships)
         self.ground_stations = GROUND_STATIONS
@@ -446,37 +586,63 @@ class DemoSimCore:
         self.running = False
 
         # Protocol v3 Phase 2: packet-level DES engine + its clock tracker
-        self.engine = PacketEngine(seed=42)
+        self.engine = PacketEngine(
+            seed=42, config={"packet_size_bytes": PACKET_SIZE_BYTES})
         self._des_last_t = 0.0
         self.update_interval = 0.2  # 5 Hz state tick (also the DES snapshot dt)
+
+        # Phase 7: dynamic links (GSL/SUL/SSL) and ISL propagation delays are
+        # recomputed at 1 Hz instead of every 5 Hz tick. Geometry drifts far
+        # slower than the tick rate, so this cuts the per-tick O(N) work by
+        # ~5x while handovers remain observable. The cache holds (src, tgt)
+        # -> prop_s for every static ISL.
+        self.link_update_interval = 1.0
+        self._last_link_update = -1e9
+        self._isl_prop = {}
+
+        # Phase 7 / protocol 3.1: state frames carry *delta* link sets.
+        # _last_link_keys remembers what the previous frame announced so we
+        # can emit links_removed; every links_full_every ticks a complete
+        # active set is sent so late-joining clients resynchronise.
+        self._last_link_keys = set()
+        self._tick_count = 0
+        self.links_full_every = 25
 
     # ------------------------------------------------------------------
     # ISL topology (static)
     # ------------------------------------------------------------------
 
     def _compute_isl_topology(self):
-        """Pre-compute intra-orbit and cross-orbit ISL pairs."""
+        """Pre-compute intra-plane ring and cross-plane ISL pairs.
+
+        Built from the structured (shell, plane, idx) attributes rather than
+        ID parsing, so it works for both 2-part and 3-part satellite IDs.
+        Cross-plane links join equal indices in adjacent planes of the same
+        shell; different shells are not cross-linked.
+        """
         links = []
-        orbits = {}
+        shells = {}
         for sat in self.satellites:
-            parts = sat.id.split('-')
-            orb_id = int(parts[1])
-            orbits.setdefault(orb_id, []).append(sat)
+            shells.setdefault(sat.shell, {}).setdefault(sat.plane, []).append(sat)
 
-        # Intra-orbit (ring)
-        for orb_id, sats in orbits.items():
-            sats_sorted = sorted(sats, key=lambda s: int(s.id.split('-')[2]))
-            n = len(sats_sorted)
-            for i in range(n):
-                links.append((sats_sorted[i].id, sats_sorted[(i+1) % n].id))
+        for _sh, planes in shells.items():
+            plane_ids = sorted(planes.keys())
+            num_planes = len(plane_ids)
 
-        # Cross-orbit (same index in adjacent planes)
-        num_orb = len(orbits)
-        for oi in range(num_orb):
-            sats_a = sorted(orbits[oi], key=lambda s: int(s.id.split('-')[2]))
-            sats_b = sorted(orbits[(oi+1) % num_orb], key=lambda s: int(s.id.split('-')[2]))
-            for i in range(min(len(sats_a), len(sats_b))):
-                links.append((sats_a[i].id, sats_b[i].id))
+            # Intra-plane ring
+            for p in plane_ids:
+                sats = sorted(planes[p], key=lambda s: s.idx)
+                n = len(sats)
+                for i in range(n):
+                    links.append((sats[i].id, sats[(i + 1) % n].id))
+
+            # Cross-plane (same index in adjacent planes)
+            for pi, p in enumerate(plane_ids):
+                sats_a = sorted(planes[p], key=lambda s: s.idx)
+                p_next = plane_ids[(pi + 1) % num_planes]
+                sats_b = sorted(planes[p_next], key=lambda s: s.idx)
+                for i in range(min(len(sats_a), len(sats_b))):
+                    links.append((sats_a[i].id, sats_b[i].id))
 
         return links
 
@@ -485,15 +651,23 @@ class DemoSimCore:
     # ------------------------------------------------------------------
 
     def _topk_uplinks(self, active_set, obs_id, obs_lat, obs_lon,
-                      sat_pos, k, min_elev_deg):
+                      sat_pos, k, min_elev_deg, grid=None):
         """Uplink set for one UAV/ship: its K nearest visible satellites.
 
         Hysteresis: currently-active links are kept as long as the satellite
         is still above the elevation mask, so links don't flicker when two
         satellites are nearly equidistant. Falls back to the single nearest
-        satellite to guarantee at least one live uplink at all times.
+        satellite (over the full constellation) to guarantee at least one
+        live uplink at all times.
+
+        grid: optional spatial grid (Phase 7) restricting the visibility
+        search to nearby satellites.
         """
-        vis = visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg)
+        candidates = None
+        if grid is not None:
+            candidates = grid_candidates(grid, obs_lat, obs_lon)
+        vis = visible_satellites(obs_lat, obs_lon, sat_pos, min_elev_deg,
+                                 candidates=candidates)
 
         result = set()
         # 1) keep active links that are still visible (hysteresis)
@@ -515,24 +689,23 @@ class DemoSimCore:
         return result
 
     def _update_dynamic_links(self, positions):
-        """Compute GSL/SUL/SSL with hysteresis."""
+        """Compute GSL/SUL/SSL with hysteresis (grid-accelerated, Phase 7)."""
         sat_pos = {sid: p for sid, p in positions.items() if sid.startswith("Sat-")}
         gs_pos = {name: (data[0], data[1]) for name, data in self.ground_stations.items()}
         uav_pos = {uid: p for uid, p in positions.items() if uid.startswith("UAV-")}
         ship_pos = {sid: p for sid, p in positions.items() if sid.startswith("Ship-")}
 
-        # GSL: ground station <-> satellite
+        grid = build_sat_grid(sat_pos)
+
+        # GSL: each ground station keeps feeder links to its K nearest
+        # visible satellites (hysteresis + nearest-satellite fallback).
+        active_gsl_rev = {(sat, gs) for gs, sat in self._active_gsl}
         new_gsl = set()
         for gs_name, (gs_lat, gs_lon) in gs_pos.items():
-            for sat_id, sp in sat_pos.items():
-                d = haversine_km(gs_lat, gs_lon, sp["lat"], sp["lon"])
-                pair = (gs_name, sat_id)
-                if pair in self._active_gsl:
-                    if d < GSL_DISCONNECT_RANGE:
-                        new_gsl.add(pair)
-                else:
-                    if d < GSL_CONNECT_RANGE:
-                        new_gsl.add(pair)
+            for sat_id, _obs in self._topk_uplinks(
+                    active_gsl_rev, gs_name, gs_lat, gs_lon,
+                    sat_pos, GSL_MAX_LINKS, GSL_MIN_ELEV_DEG, grid=grid):
+                new_gsl.add((gs_name, sat_id))
         self._active_gsl = new_gsl
 
         # SUL: each UAV uplinks to its K nearest visible satellites
@@ -540,7 +713,7 @@ class DemoSimCore:
         for uav_id, up in uav_pos.items():
             new_sul |= self._topk_uplinks(
                 self._active_sul, uav_id, up["lat"], up["lon"],
-                sat_pos, SUL_MAX_LINKS, SUL_MIN_ELEV_DEG)
+                sat_pos, SUL_MAX_LINKS, SUL_MIN_ELEV_DEG, grid=grid)
         self._active_sul = new_sul
 
         # SSL: each ship uplinks to its K nearest visible satellites
@@ -548,7 +721,7 @@ class DemoSimCore:
         for ship_id, shp in ship_pos.items():
             new_ssl |= self._topk_uplinks(
                 self._active_ssl, ship_id, shp["lat"], shp["lon"],
-                sat_pos, SSL_MAX_LINKS, SSL_MIN_ELEV_DEG)
+                sat_pos, SSL_MAX_LINKS, SSL_MIN_ELEV_DEG, grid=grid)
         self._active_ssl = new_ssl
 
     # ------------------------------------------------------------------
@@ -574,19 +747,32 @@ class DemoSimCore:
                                         tp[0], tp[1], tp[2]) / 1000.0
         return 0.0
 
-    def _des_step(self, positions):
-        """Drive the packet-level DES from the live topology and return metrics.
+    def _refresh_isl_prop(self, positions):
+        """Recompute geometric propagation delays for all static ISLs.
 
-        Builds the current undirected edge set (ISL + active GSL/SUL/SSL) with
-        geometric propagation delays, declares UAV/ship -> nearest-ground-station
-        Poisson flows, advances the engine to sim_time (flushing on a time
-        discontinuity such as seek/stop/reset), and returns a fresh snapshot.
+        Called at the 1 Hz link-refresh cadence (Phase 7); between refreshes
+        the DES routes with slightly stale ISL weights, which is harmless:
+        laser-link delays drift by microseconds per second.
+        """
+        cache = {}
+        for src, tgt in self.isl_links:
+            cache[(src, tgt)] = self._edge_prop(positions, src, tgt)
+        self._isl_prop = cache
+
+    def _sync_engine_topology(self, positions):
+        """Push the current edge set into the DES engine.
+
+        Called at the 1 Hz link-refresh cadence: between refreshes neither
+        the active link sets nor the cached ISL propagation delays change,
+        so syncing every 5 Hz tick would be wasted work (at 1584 scale the
+        edge signature alone hashes ~6500 keys).
         """
         nodes = (list(positions.keys()) + list(self.ground_stations.keys()))
 
         edges = []
+        isl_prop = self._isl_prop
         for src, tgt in self.isl_links:
-            edges.append((src, tgt, "isl", self._edge_prop(positions, src, tgt)))
+            edges.append((src, tgt, "isl", isl_prop.get((src, tgt), 0.0)))
         for gs_name, sat_id in self._active_gsl:
             edges.append((gs_name, sat_id, "gsl",
                           self._edge_prop(positions, gs_name, sat_id)))
@@ -597,8 +783,19 @@ class DemoSimCore:
             edges.append((sat_id, ship_id, "ssl",
                           self._edge_prop(positions, sat_id, ship_id)))
 
-        self.engine.sync_topology(nodes, edges)
+        # Only satellites forward in transit; UAVs / ships / ground stations
+        # originate and receive traffic but must not shortcut the mesh.
+        transit = (sid for sid in positions if sid.startswith("Sat-"))
+        self.engine.sync_topology(nodes, edges, transit=transit)
 
+    def _des_step(self, positions):
+        """Drive the packet-level DES and return metrics.
+
+        Declares UAV/ship -> nearest-ground-station Poisson flows, advances
+        the engine to sim_time (flushing on a time discontinuity such as
+        seek/stop/reset), and returns a fresh snapshot. The engine's edge
+        set is maintained separately by _sync_engine_topology (1 Hz).
+        """
         # Traffic: each UAV / ship sources packets to its nearest ground station.
         gs_items = list(self.ground_stations.items())
         source_sink = {}
@@ -640,38 +837,37 @@ class DemoSimCore:
         return self.engine.snapshot(dt)
 
     def _link_dict(self, positions, src, tgt, link_type, metrics):
-        """Build one link dict using real DES metrics (geometric prop fallback)."""
+        """Build one slim protocol 3.1 link entry (short keys).
+
+        Keys: t=type, u=bandwidth utilization, l=latency_ms, d=loss rate,
+        tx=tx_bps, q=queue depth, p=propagation_ms. Capacity is known per
+        type from simulation_init link_types and is not repeated.
+        """
         m = metrics["links"].get(frozenset((src, tgt)))
-        sp = self._node_position(positions, src)
-        tp = self._node_position(positions, tgt)
-        prop_ms = (propagation_delay_ms(sp[0], sp[1], sp[2],
-                                        tp[0], tp[1], tp[2])
-                   if sp and tp else 0.0)
         if m:
+            prop_ms = m["propagation_ms"]
             util = m["utilization"]
             latency = m["latency_ms"] if m["latency_ms"] > 0 else prop_ms
             loss = m["loss_rate"]
             tx_bps = m["tx_bps"]
             qd = m["queue_depth"]
-            qcap = m["queue_capacity"]
-            prop_ms = m["propagation_ms"]
         else:
-            util = latency = loss = tx_bps = 0.0
+            sp = self._node_position(positions, src)
+            tp = self._node_position(positions, tgt)
+            prop_ms = (propagation_delay_ms(sp[0], sp[1], sp[2],
+                                            tp[0], tp[1], tp[2])
+                       if sp and tp else 0.0)
+            util = loss = tx_bps = 0.0
+            latency = prop_ms
             qd = 0
-            qcap = PACKET_QUEUE_CAPACITY * 2
         return {
-            "type": link_type,
-            "source": src,
-            "target": tgt,
-            "is_active": True,
-            "bandwidth_utilization": round(util, 4),
-            "latency_ms": round(latency, 2),
-            "loss_rate": round(loss, 4),
-            "tx_bps": round(tx_bps, 1),
-            "capacity_bps": LINK_CAPACITY_BPS[link_type],
-            "queue_depth": int(qd),
-            "queue_capacity": int(qcap),
-            "propagation_ms": round(prop_ms, 2),
+            "t": link_type,
+            "u": round(util, 4),
+            "l": round(latency, 2),
+            "d": round(loss, 4),
+            "tx": round(tx_bps, 1),
+            "q": int(qd),
+            "p": round(prop_ms, 2),
         }
 
     # ------------------------------------------------------------------
@@ -683,17 +879,20 @@ class DemoSimCore:
         nodes = {}
 
         # Satellites
+        multi_shell = self._shells is not None and len(self._shells) > 1
         for sat in self.satellites:
-            parts = sat.id.split('-')
+            orbit = {
+                "altitude_km": sat.altitude_km,
+                "inclination_deg": math.degrees(sat.inclination_rad),
+                "plane": sat.plane,
+                "index": sat.idx,
+            }
+            if multi_shell:
+                orbit["shell"] = sat.shell
             nodes[sat.id] = {
                 "type": "satellite",
                 "label": sat.id,
-                "orbit": {
-                    "altitude_km": sat.altitude_km,
-                    "inclination_deg": math.degrees(sat.inclination_rad),
-                    "plane": int(parts[1]),
-                    "index": int(parts[2]),
-                },
+                "orbit": orbit,
             }
 
         # UAVs
@@ -727,10 +926,15 @@ class DemoSimCore:
         return {
             "message_type": "simulation_init",
             "payload": {
-                "version": "3.0",
+                "version": "3.1",
                 "duration": self.duration,
                 "update_rate_hz": 5,
                 "nodes": nodes,
+                # Phase 7: state frames send compact sat_pos arrays aligned
+                # to this order, plus delta link sets; the static ISL mesh
+                # is announced once here so clients can draw it up front.
+                "sat_order": [s.id for s in self.satellites],
+                "isl_topology": [list(pair) for pair in self.isl_links],
                 "link_types": {
                     "isl": {"label": "星间链路", "color": "#4FC3F7",
                             "capacity_bps": LINK_CAPACITY_BPS["isl"]},
@@ -757,53 +961,87 @@ class DemoSimCore:
         }
 
     def get_state_update(self):
-        """Build v3 state_update (v2 fields + packet-level telemetry)."""
-        positions = {}
+        """Build protocol 3.1 state_update (delta links, compact positions).
 
-        # Satellite positions
+        Frame layout (Phase 7, thousand-satellite scale):
+          sat_pos       -- [[lat, lon], ...] aligned to init sat_order;
+                           satellite altitude is constant (init orbit.altitude_km)
+          positions     -- dynamic nodes only (UAV / ship), rounded
+          links         -- delta set: non-idle ISLs + all GSL/SUL/SSL,
+                           slim short-key entries (see _link_dict)
+          links_removed -- link keys dropped since the previous frame
+          links_full    -- true on the first frame and every
+                           links_full_every ticks (complete active set)
+          node_metrics  -- window-active nodes only (filtered by the engine)
+        """
+        self._tick_count += 1
+
+        # --- Positions (rounded; the same dict feeds internal geometry) ---
+        positions = {}
+        sat_pos = []
         for sat in self.satellites:
             lat, lon, alt = sat.get_position(self.sim_time)
-            positions[sat.id] = {"lat": lat, "lon": lon, "alt": alt}
+            rlat, rlon = round(lat, 3), round(lon, 3)
+            positions[sat.id] = {"lat": rlat, "lon": rlon, "alt": int(alt)}
+            sat_pos.append([rlat, rlon])
 
-        # UAV positions
         for uav in self.uavs:
             lat, lon, alt, heading = uav.get_position(self.sim_time)
-            positions[uav.id] = {"lat": lat, "lon": lon, "alt": alt, "heading": heading}
+            positions[uav.id] = {
+                "lat": round(lat, 3), "lon": round(lon, 3),
+                "alt": int(alt), "heading": round(heading, 1),
+            }
 
-        # Ship positions (with time offset)
         for ship in self.ships:
             t_ship = self.sim_time + getattr(ship, '_time_offset', 0.0)
             lat, lon, alt, heading = ship.get_position(t_ship)
-            positions[ship.id] = {"lat": lat, "lon": lon, "alt": alt, "heading": heading}
+            positions[ship.id] = {
+                "lat": round(lat, 3), "lon": round(lon, 3),
+                "alt": int(alt), "heading": round(heading, 1),
+            }
 
-        # Update dynamic links
-        self._update_dynamic_links(positions)
+        # Update dynamic links + ISL propagation cache (Phase 7: at 1 Hz).
+        # Always recompute when time runs backwards (seek / stop / reset).
+        if (self.sim_time < self._last_link_update or
+                self.sim_time - self._last_link_update >=
+                self.link_update_interval):
+            self._update_dynamic_links(positions)
+            self._refresh_isl_prop(positions)
+            self._sync_engine_topology(positions)
+            self._last_link_update = self.sim_time
 
         # Protocol v3 Phase 2: drive the packet-level DES on the live topology
         metrics = self._des_step(positions)
+        link_metrics = metrics["links"]
 
-        # Build links dict from real DES measurements
+        # --- Delta link set ---
         links = {}
 
-        # ISL (always active)
+        # ISL: only links with window activity (present in the snapshot).
+        # Idle laser links carry no metrics and are omitted from the frame.
         for src, tgt in self.isl_links:
-            links[f"{src}--{tgt}"] = self._link_dict(
-                positions, src, tgt, "isl", metrics)
+            if frozenset((src, tgt)) in link_metrics:
+                links[f"{src}--{tgt}"] = self._link_dict(
+                    positions, src, tgt, "isl", metrics)
 
-        # GSL
+        # GSL / SUL / SSL: structural, always announced.
         for gs_name, sat_id in self._active_gsl:
             links[f"{gs_name}--{sat_id}"] = self._link_dict(
                 positions, gs_name, sat_id, "gsl", metrics)
-
-        # SUL
         for sat_id, uav_id in self._active_sul:
             links[f"{sat_id}--{uav_id}"] = self._link_dict(
                 positions, sat_id, uav_id, "sul", metrics)
-
-        # SSL
         for sat_id, ship_id in self._active_ssl:
             links[f"{sat_id}--{ship_id}"] = self._link_dict(
                 positions, sat_id, ship_id, "ssl", metrics)
+
+        cur_keys = set(links.keys())
+        links_full = (self._tick_count % self.links_full_every) == 1
+        if links_full:
+            links_removed = []
+        else:
+            links_removed = sorted(self._last_link_keys - cur_keys)
+        self._last_link_keys = cur_keys
 
         # Routing highlight (cycle through interesting cross-domain paths)
         routing = {}
@@ -825,26 +1063,32 @@ class DemoSimCore:
             ssl_pair = next(iter(self._active_ssl))
             routing["highlight_path"] = [ssl_pair[0], ssl_pair[1]]
 
-        # Metrics summary
-        active_count = sum(1 for lk in links.values() if lk["is_active"])
-        carrying = [lk for lk in links.values() if lk.get("tx_bps", 0) > 0]
-        utils = [lk["bandwidth_utilization"] for lk in carrying]
-        latencies = [lk["latency_ms"] for lk in links.values() if lk["is_active"]]
+        # Metrics summary (over the links announced in this frame)
+        carrying = [lk for lk in links.values() if lk["tx"] > 0]
+        utils = [lk["u"] for lk in carrying]
+        latencies = [lk["l"] for lk in links.values()]
 
-        # Protocol v3 Phase 2: per-node packet metrics + aggregates from the DES
+        # Per-node packet metrics (window-active only) + DES aggregates
         node_metrics = metrics["nodes"]
         summary = metrics["summary"]
+
+        # Dynamic-node positions only (satellites travel via sat_pos)
+        dyn_positions = {nid: p for nid, p in positions.items()
+                         if not nid.startswith("Sat-")}
 
         return {
             "message_type": "state_update",
             "payload": {
                 "timestamp": round(self.sim_time, 2),
-                "positions": positions,
+                "sat_pos": sat_pos,
+                "positions": dyn_positions,
                 "links": links,
+                "links_removed": links_removed,
+                "links_full": links_full,
                 "node_metrics": node_metrics,
                 "routing": routing,
                 "metrics_summary": {
-                    "active_links": active_count,
+                    "active_links": len(links),
                     "total_nodes": len(positions) + len(self.ground_stations),
                     "avg_utilization": round(sum(utils) / len(utils), 3) if utils else 0,
                     "max_latency_ms": round(max(latencies), 1) if latencies else 0,
@@ -922,8 +1166,9 @@ class DemoSimCore:
         print(f"  Ships:           {num_ships}")
         print(f"  Ground Stations: {num_gs}")
         print(f"  ISL links:       {len(self.isl_links)}")
+        print(f"  Scale preset:    {self.scale}")
         print(f"  Duration:        {self.duration}s")
-        print(f"  Protocol:        v2.0")
+        print(f"  Protocol:        v3")
         print(f"{'='*55}\n")
 
         retry_count = 0
@@ -1013,6 +1258,10 @@ async def main():
                         help="Number of orbital planes")
     parser.add_argument("--sats-per-orbit", type=int, default=12,
                         help="Satellites per orbit")
+    parser.add_argument("--scale", type=int, default=None,
+                        choices=sorted(SCALE_PRESETS.keys()),
+                        help="Constellation size preset (overrides "
+                             "--num-orbits/--sats-per-orbit)")
     parser.add_argument("--num-uavs", type=int, default=8,
                         help="Number of UAVs")
     parser.add_argument("--num-ships", type=int, default=10,
@@ -1026,6 +1275,7 @@ async def main():
         sats_per_orbit=args.sats_per_orbit,
         num_uavs=args.num_uavs,
         num_ships=args.num_ships,
+        scale=args.scale,
     )
     await core.run()
 

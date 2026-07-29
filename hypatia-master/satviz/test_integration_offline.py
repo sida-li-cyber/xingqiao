@@ -3,7 +3,7 @@
 Instantiates the real SimulationCore (no WebSocket), steps it like the run
 loop would, and verifies that genuine packet-level metrics emerge:
   - packets are generated, forwarded and delivered
-  - aggregate throughput and per-link tx_bps are non-zero
+  - aggregate throughput and per-link tx are non-zero
   - SUL/SSL uplinks carry traffic (UAVs/ships -> nearest ground station)
   - per-node counters and e2e latency are populated
 """
@@ -36,10 +36,10 @@ def main():
     print(f"  links total       : {len(links)}")
     by_type = {}
     for lk in links.values():
-        by_type.setdefault(lk["type"], []).append(lk)
+        by_type.setdefault(lk["t"], []).append(lk)
     for lt, lst in sorted(by_type.items()):
-        tx = sum(x["tx_bps"] for x in lst)
-        active = sum(1 for x in lst if x["tx_bps"] > 0)
+        tx = sum(x["tx"] for x in lst)
+        active = sum(1 for x in lst if x["tx"] > 0)
         print(f"    {lt:4s}: n={len(lst):3d}  carrying={active:3d}"
               f"  sum_tx={tx/1e6:8.2f} Mbps")
 
@@ -78,8 +78,8 @@ def main():
         errs.append("no packets delivered")
     if ms["aggregate_throughput_bps"] <= 0:
         errs.append("zero aggregate throughput")
-    sul_tx = sum(x["tx_bps"] for x in by_type.get("sul", []))
-    ssl_tx = sum(x["tx_bps"] for x in by_type.get("ssl", []))
+    sul_tx = sum(x["tx"] for x in by_type.get("sul", []))
+    ssl_tx = sum(x["tx"] for x in by_type.get("ssl", []))
     if sul_tx <= 0:
         errs.append("SUL uplinks carry no traffic")
     if ssl_tx <= 0:

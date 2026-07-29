@@ -2,10 +2,10 @@
 
 > 适用项目：空天海网络可视化实时交互仿真演示系统
 > 日期：2026-07-29
-> 状态：阶段 1、2、3、4、5、6 已实施（于 v3 工作副本 `dayilixiang-v3`）
+> 状态：阶段 1、2、3、4、5、6、7 已实施（于 v3 工作副本 `dayilixiang-v3`）
 > 维护：李思达
 >
-> **进度**：✅ 阶段 1（协议与指标地基）｜✅ 阶段 2（DES 核心）｜✅ 阶段 3（多域流）｜✅ 阶段 4（解耦平滑）｜✅ 阶段 5（包级可视化）｜✅ 阶段 6（校验加固）
+> **进度**：✅ 阶段 1（协议与指标地基）｜✅ 阶段 2（DES 核心）｜✅ 阶段 3（多域流）｜✅ 阶段 4（解耦平滑）｜✅ 阶段 5（包级可视化）｜✅ 阶段 6（校验加固）｜✅ 阶段 7（千星级规模）
 >
 > **v2 / v3 分线**：`dayilixiang`（桌面原文件夹）保留为 v2 稳定版；`dayilixiang-v3` 为 v3 开发线，本路线图及后续开发均在此进行。
 
@@ -254,7 +254,7 @@ Hypatia 原生框架基于 ns-3（C++）做包级仿真，但存在以下问题�
 >
 > 代码地基（现状）：`Satellite` 为单层圆轨道；`create_constellation` 已是 Walker 风格（奇偶轨道面错相）；ISL 在初始化时静态计算（`compute_links`）；GSL 用距离迟滞（2000/2200 km），SUL/SSL 用「K 个最近可见星」（仰角掩码 5°）；`packet_sim` 已有拓扑 dirty 标志触发路由重算、`link_error_rate` 接口与切换丢包机制。
 
-### 阶段 7 — 千星级规模
+### 阶段 7 — 千星级规模 ✅
 
 **目标**：1000+ 卫星 / ~2500 链路下，核心 ≥20 ticks/s、前端 ≥30 FPS（1080p），包守恒仍精确。
 
@@ -267,6 +267,16 @@ Hypatia 原生框架基于 ns-3（C++）做包级仿真，但存在以下问题�
 - **前端 LOD**：仅渲染承载链路 / 按相机距离过滤，节点点聚合，实体池复用（避免每帧重建）。
 
 **产出 / 验收**：1584 星预设稳定运行 600 s，核心 ≥20 ticks/s、前端 ≥30 FPS；稳态单帧 WS 负载 <100 KB；`test_phase6` 全绿（守恒精确）；新增千星级压测脚本。
+
+> **实施记录（2026-07-29）**：
+> - **多壳层 Walker-δ 生成器**：`create_constellation` 扩展为壳层列表（高度 / 倾角 / 轨道面数 × 每面星数 × 相位因子 F）。ID 方案：单壳层沿用 `Sat-{plane}-{idx}`（legacy 72 星几何逐字节不变，`DemoSimCore()` ≡ `DemoSimCore(scale=72)`），多壳层用 `Sat-{shell}-{plane}-{idx}`。CLI 预设 `--scale 72|440|1584`（440≈Starlink Gen1 单壳层、1584≈三壳层）。
+> - **结构化 ISL 邻接**：面内环 (i±1) + 面间同纬度邻接，O(N) 生成替代 O(N²)，每星最小度 4，ISL 数恒为 2N；拓扑变化走 `packet_sim` 既有切换丢包路径。
+> - **可见性降频 + 空间网格**：GSL/SUL/SSL 可见性重算降频至 1 Hz（tick 间保持）；仰角掩码候选筛选改用 10° 经纬网格（margin 3）预过滤，与暴力扫描成员集**完全一致**（test 13 含日期变更线/极点/多仰角逐时刻比对）。
+> - **协议 3.1 瘦身**：init 携带 `sat_order` + `isl_topology` + `link_types`（容量表）+ `version="3.1"`；state 帧卫星位置压成与 `sat_order` 对齐的 `sat_pos:[[lat,lon]]`（高度为常量，取自 init），`positions` 仅含动态节点（UAV/船），链路改短键增量 `{t,u,l,d,tx,q,p}` + `links_removed`，每 25 tick 一次 `links_full`（首帧即全量），`node_metrics` 仅窗口活跃节点。
+> - **核心热点优化**：`packet_sim.snapshot()` 改遍历预计算的 `_snap_groups`（`(undir_key, capacity, prop_ms, [(link,port)…])`，仅拓扑变化时重建），免去每 tick 重建 undir_map + 端口查表。
+> - **前端适配（最小爆炸半径）**：`app.js` 作为唯一归一化层——`_rebuildPositions` 由 `sat_pos`+`sat_order`+`satAltM` 还原完整位置、`_mergeLinks`/`_expandLink` 把短键增量展开成长键并合并进 `linkCache`（delta 合并 + 陈旧剪枝）；`cesium-manager`/`ui-controller`/`packet-flow` 仍消费长键、零改动。新增装饰性静态 ISL 网格 `setStaticISLMesh`（仅 ≤200 星绘制、不可选中），千星级下空闲 ISL 零渲染开销。cache-bust v=3h0。
+> - **压测脚本 `test_phase7.py`（测试 12–16，固定种子）**：12 生成健全性（各预设 N/唯一 ID/ISL=2N/最小度≥4/ID 段数 + legacy 逐字节回归 + 多壳层 48 星）；13 网格==暴力；14 协议 3.1 帧结构（version/sat_order/短键集合/positions 无 Sat-*/links_full 节奏）；15 = 440 星 600 s 离线压测；16 = 1584 星 3000 tick 长时（`--long`）。
+> - **验收实测**：1584 预设 **33.9 ticks/s**（目标 ≥20）、稳态单帧 **44.5–47.2 KB**（<100 KB）、包守恒**精确**、600 s 切换 203 次无 tick 退化（末段 3.27 s < 3×首段 2.82 s）；72=61.1 ticks/s/12.5 KB、440=49.7/23.6 KB。VM 浏览器实测 1584 星 **48 FPS**（目标 ≥30）、节点 1617、活跃链路 105、仿真时间持续推进。测试 1–16 + R1–R5 + 离线集成**全绿**。
 
 ### 阶段 8 — 轨道真实性
 

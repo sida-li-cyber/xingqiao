@@ -168,8 +168,13 @@ class PacketEngine:
         self.links = {}               # (u, v) -> Link
         self.ports = {}               # (u, v) -> Port
         self.adj = defaultdict(list)  # u -> [(v, weight=prop_s)]
+        self.transit = None           # nodes allowed to forward in transit
         self._edge_sig = None
         self._topo_dirty = False
+        # Phase 7: precomputed undirected aggregation groups for snapshot():
+        # (undir_key, capacity_bps, propagation_ms, [(link, port), ...]).
+        # Rebuilt whenever the edge set or the port objects change.
+        self._snap_groups = []
 
         self.route = defaultdict(dict)   # node -> {sink: next_hop}
         self.source_sink = {}            # source -> sink
@@ -201,11 +206,16 @@ class PacketEngine:
         self.n_delivered_prio = [0] * NUM_PRIO   # cumulative deliveries per priority
         self.e2e_samples = []                 # windowed, seconds
         self.node_e2e = defaultdict(list)     # windowed, seconds
+        # Phase 7: windowed per-node activity markers (cleared each snapshot),
+        # used to emit node metrics only for recently-active nodes.
+        self.n_fwd_window = defaultdict(int)
+        self.n_drop_window = defaultdict(int)
 
     def flush(self, until):
         """Hard reset on a time discontinuity (seek / stop / reset)."""
         self.events = []
         self.ports = {k: Port(lk) for k, lk in self.links.items()}
+        self._rebuild_snap_groups()
         self._gen_scheduled = set()
         self._last_route_refresh = -_INF
         self._topo_dirty = True
@@ -223,11 +233,17 @@ class PacketEngine:
     # Topology & flows (fed by the caller each tick)
     # ------------------------------------------------------------------
 
-    def sync_topology(self, nodes, edges):
+    def sync_topology(self, nodes, edges, transit=None):
         """Differentially update the directed graph.
 
         nodes: iterable of node ids.
         edges: iterable of (a, b, link_type, prop_s) undirected links.
+        transit: optional iterable of node ids allowed to act as
+            intermediate forwarding hops. None (default) lets every node
+            transit. Nodes outside the set still originate and receive
+            traffic; routing simply never relaxes *through* them (Phase 7:
+            keeps UAVs, ships and ground stations from being used as
+            shortcuts between satellites).
 
         Surviving directed links keep their Link/Port state (queues, in-tx
         packet, byte counters). Removed links are drained and every packet they
@@ -236,6 +252,7 @@ class PacketEngine:
         a real, observable loss spike when a link hands over.
         """
         self.nodes = set(nodes)
+        self.transit = set(transit) if transit is not None else None
         cap_by_type = self.cfg["capacity"]
 
         # Normalise undirected edges into directed (u, v) specs.
@@ -269,6 +286,7 @@ class PacketEngine:
                     if lk is not None:
                         lk.drops += 1
                     self.n_dropped[pkt.src] += 1
+                    self.n_drop_window[pkt.src] += 1
                     self.n_dropped_prio[pkt.prio] += 1
                     self.total_dropped += 1
                     self.total_handover_dropped += 1
@@ -301,6 +319,25 @@ class PacketEngine:
         for (u, v), lk in self.links.items():
             self.adj[u].append((v, lk.prop_s))
 
+        self._rebuild_snap_groups()
+
+    def _rebuild_snap_groups(self):
+        """Precompute the undirected aggregation groups used by snapshot().
+
+        Avoids rebuilding a defaultdict of directed links (and repeated port
+        lookups) on every tick — at 1584-satellite scale that map alone cost
+        several milliseconds per tick.
+        """
+        by_undir = {}
+        for lk in self.links.values():
+            by_undir.setdefault(lk.undir, []).append(lk)
+        ports = self.ports
+        self._snap_groups = [
+            (uk, dirs[0].capacity_bps, dirs[0].prop_s * 1000.0,
+             [(d, ports.get((d.u, d.v))) for d in dirs])
+            for uk, dirs in by_undir.items()
+        ]
+
     def sync_flows(self, source_sink, flow_rate=None, flow_prio=None):
         """Declare traffic sources, their sinks, per-source rates and priority."""
         self.source_sink = dict(source_sink)
@@ -328,6 +365,7 @@ class PacketEngine:
             for v, w in self.adj[u]:
                 radj[v].append((u, w))
 
+        transit = self.transit
         self.route = defaultdict(dict)
         for sink in self.sinks:
             dist = {sink: 0.0}
@@ -336,6 +374,10 @@ class PacketEngine:
             while heap:
                 d, x = heapq.heappop(heap)
                 if d > dist.get(x, _INF):
+                    continue
+                # Only nodes allowed to forward in transit (plus the sink
+                # itself, for the final downlink hop) may be relaxed through.
+                if transit is not None and x != sink and x not in transit:
                     continue
                 for u, w in radj.get(x, ()):
                     nd = d + w
@@ -355,8 +397,13 @@ class PacketEngine:
             self.now = until
             return
 
-        if (self._topo_dirty or
-                until - self._last_route_refresh > self.cfg["route_refresh_interval"]):
+        # Phase 7: refresh routes at most once per route_refresh_interval.
+        # Topology churn (e.g. 1 Hz link handovers at thousand-satellite
+        # scale) no longer triggers a Dijkstra storm; the first refresh
+        # after init / flush is still immediate because _last_route_refresh
+        # starts at -inf. Routing on a briefly stale graph is safe: packets
+        # aimed at a removed link are dropped and counted in _enqueue.
+        if until - self._last_route_refresh > self.cfg["route_refresh_interval"]:
             self._refresh_routes()
             self._last_route_refresh = until
             self._topo_dirty = False
@@ -377,15 +424,13 @@ class PacketEngine:
     # Event handlers
     # ------------------------------------------------------------------
 
-    def _push(self, t, kind, a, b=None):
-        self._seq += 1
-        heapq.heappush(self.events, (t, self._seq, kind, a, b))
-
     def _schedule_gen(self, source, t):
         rate = self.flow_rate.get(source, 0)
         if rate <= 0:
             return
-        self._push(t + self.rng.expovariate(rate), GEN, source)
+        self._seq += 1
+        heapq.heappush(self.events,
+                       (t + self.rng.expovariate(rate), self._seq, GEN, source, None))
 
     def _on_generate(self, source, t):
         # Reschedule next arrival first (keeps the flow going regardless)
@@ -407,6 +452,7 @@ class PacketEngine:
         nh = self.route.get(source, {}).get(dst)
         if nh is None:
             self.n_dropped[source] += 1
+            self.n_drop_window[source] += 1
             self.n_dropped_prio[prio] += 1
             self.total_dropped += 1
             return
@@ -421,6 +467,7 @@ class PacketEngine:
         # Drop: link gone
         if port is None:
             self.n_dropped[u] += 1
+            self.n_drop_window[u] += 1
             self.n_dropped_prio[packet.prio] += 1
             self.total_dropped += 1
             if packet.alive:
@@ -441,6 +488,7 @@ class PacketEngine:
                         break
             if victim is None:
                 self.n_dropped[u] += 1
+                self.n_drop_window[u] += 1
                 self.n_dropped_prio[packet.prio] += 1
                 self.total_dropped += 1
                 if link is not None:
@@ -451,6 +499,7 @@ class PacketEngine:
                 return
             # Account the pushed-out (lower-priority) packet as the drop.
             self.n_dropped[u] += 1
+            self.n_drop_window[u] += 1
             self.n_dropped_prio[victim.prio] += 1
             self.total_dropped += 1
             if link is not None:
@@ -484,7 +533,9 @@ class PacketEngine:
         link.lat_cnt += 1
 
         port.busy_until = t + ser
-        self._push(port.busy_until, TX, (link.u, link.v))
+        self._seq += 1
+        heapq.heappush(self.events,
+                       (port.busy_until, self._seq, TX, (link.u, link.v), None))
 
     def _on_tx_complete(self, u, v, t):
         port = self.ports.get((u, v))
@@ -499,6 +550,7 @@ class PacketEngine:
         if err > 0 and self.rng.random() < err:
             # Corrupted in transit
             self.n_dropped[u] += 1
+            self.n_drop_window[u] += 1
             self.n_dropped_prio[packet.prio] += 1
             self.total_dropped += 1
             link.drops += 1
@@ -506,7 +558,9 @@ class PacketEngine:
                 self.in_flight -= 1
                 packet.alive = False
         else:
-            self._push(t + link.prop_s, ARR, v, packet)
+            self._seq += 1
+            heapq.heappush(self.events,
+                           (t + link.prop_s, self._seq, ARR, v, packet))
 
         if port.queued:
             self._start_tx(port, t)
@@ -530,9 +584,11 @@ class PacketEngine:
             return
 
         self.n_forwarded[node] += 1
+        self.n_fwd_window[node] += 1
         nh = self.route.get(node, {}).get(packet.dst)
         if nh is None:
             self.n_dropped[node] += 1
+            self.n_drop_window[node] += 1
             self.n_dropped_prio[packet.prio] += 1
             self.total_dropped += 1
             self.in_flight -= 1
@@ -548,49 +604,53 @@ class PacketEngine:
         dt = dt if dt > 0 else 0.0
 
         # --- Per undirected link metrics (aggregate both directions) ---
-        undir_map = defaultdict(list)
-        for lk in self.links.values():
-            undir_map[lk.undir].append(lk)
-
+        # Phase 7: iterate the precomputed _snap_groups (rebuilt only when
+        # the topology changes) instead of rebuilding an undirected map and
+        # re-looking-up ports on every tick.
         link_metrics = {}
         agg_throughput = 0.0
         qcap = self.cfg["queue_capacity_pkts"]
-        for uk, dirs in undir_map.items():
-            rates = []
-            for d in dirs:
-                r = (d.bytes_tx - d.prev_bytes_tx) * 8.0 / dt if dt > 0 else 0.0
-                rates.append(r)
-            tx_sum = sum(rates)
-            tx_max = max(rates) if rates else 0.0
+        rate_scale = 8.0 / dt if dt > 0 else 0.0
+        for uk, cap, prop_ms, dps in self._snap_groups:
+            tx_sum = 0.0
+            tx_max = 0.0
+            qd = 0
+            lat_sum = 0.0
+            lat_cnt = 0
+            att = 0
+            drp = 0
+            for d, port in dps:
+                r = (d.bytes_tx - d.prev_bytes_tx) * rate_scale
+                tx_sum += r
+                if r > tx_max:
+                    tx_max = r
+                if port is not None:
+                    qd += port.queued + (1 if port.in_tx is not None else 0)
+                lat_sum += d.lat_sum
+                lat_cnt += d.lat_cnt
+                att += d.attempts
+                drp += d.drops
             agg_throughput += tx_sum
 
-            cap = dirs[0].capacity_bps
-            qd = 0
-            for d in dirs:
-                p = self.ports.get((d.u, d.v))
-                if p is not None:
-                    qd += p.queued + (1 if p.in_tx is not None else 0)
-
-            lat_cnt = sum(d.lat_cnt for d in dirs)
-            lat_sum = sum(d.lat_sum for d in dirs)
+            loss = (drp / att) if att else 0.0
             lat_ms = (lat_sum / lat_cnt * 1000.0) if lat_cnt else 0.0
 
-            att = sum(d.attempts for d in dirs)
-            drp = sum(d.drops for d in dirs)
-            loss = (drp / att) if att else 0.0
+            # Phase 7: omit idle links from the per-link metrics dict so
+            # thousand-satellite snapshots stay small. Aggregate throughput
+            # still accounts every link, and window state is always reset.
+            if tx_sum > 0 or qd > 0 or lat_cnt > 0 or att > 0:
+                link_metrics[uk] = {
+                    "tx_bps": tx_sum,
+                    "capacity_bps": cap,
+                    "utilization": (tx_max / cap) if cap else 0.0,
+                    "queue_depth": qd,
+                    "queue_capacity": qcap * len(dps),
+                    "propagation_ms": prop_ms,
+                    "latency_ms": lat_ms,
+                    "loss_rate": loss,
+                }
 
-            link_metrics[uk] = {
-                "tx_bps": tx_sum,
-                "capacity_bps": cap,
-                "utilization": (tx_max / cap) if cap else 0.0,
-                "queue_depth": qd,
-                "queue_capacity": qcap * len(dirs),
-                "propagation_ms": dirs[0].prop_s * 1000.0,
-                "latency_ms": lat_ms,
-                "loss_rate": loss,
-            }
-
-            for d in dirs:
+            for d, _port in dps:
                 d.prev_bytes_tx = d.bytes_tx
                 d.lat_sum = 0.0
                 d.lat_cnt = 0
@@ -598,8 +658,17 @@ class PacketEngine:
                 d.drops = 0
 
         # --- Per-node metrics (counters cumulative; latency windowed) ---
+        # Phase 7: emit only nodes that matter — traffic sources / sinks
+        # (always) plus nodes with forward, drop or e2e activity in this
+        # window. At thousand-satellite scale this keeps the payload to the
+        # ~100-200 nodes actually carrying traffic instead of the whole graph.
+        active_nodes = set(self.sources) | set(self.sinks)
+        active_nodes.update(self.n_fwd_window.keys())
+        active_nodes.update(self.n_drop_window.keys())
+        active_nodes.update(self.node_e2e.keys())
+
         node_metrics = {}
-        for node in self.nodes:
+        for node in active_nodes:
             e2e = self.node_e2e.get(node)
             if e2e:
                 avg = sum(e2e) / len(e2e) * 1000.0
@@ -621,6 +690,8 @@ class PacketEngine:
                 "jitter_ms": jitter,
             }
         self.node_e2e.clear()
+        self.n_fwd_window.clear()
+        self.n_drop_window.clear()
 
         # --- Global summary ---
         if self.e2e_samples:

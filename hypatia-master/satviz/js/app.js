@@ -25,6 +25,16 @@ class SatelliteVisualizationApp {
         // Protocol v3: per-node packet telemetry (nodeId -> metrics)
         this.nodeMetrics = {};
 
+        // Protocol 3.1 (Phase 7): compact state frames. Satellite positions
+        // arrive as sat_pos arrays aligned to sat_order (altitude is constant
+        // and comes from init); links arrive as short-key deltas merged into
+        // linkCache; a one-shot static ISL mesh may be drawn at small scales.
+        this.satOrder = [];
+        this.satAltM = {};
+        this.linkCache = {};
+        this.queueCapacityPkts = 0;
+        this.pendingISLMesh = null;
+
         this._wsConnected = false;
     }
 
@@ -97,6 +107,11 @@ class SatelliteVisualizationApp {
         this.nodeTypeMap.clear();
         this.nodeMetadata = {};
         this.currentRoute = null;
+        this.linkCache = {};
+        this.nodeMetrics = {};
+        this.satOrder = [];
+        this.satAltM = {};
+        this.pendingISLMesh = null;
         this.ui.hideDetail();
         this.ui.resetCharts();
 
@@ -110,6 +125,27 @@ class SatelliteVisualizationApp {
         if (payload.link_types) {
             this.linkTypes = payload.link_types;
         }
+
+        // Protocol 3.1: compact state-frame support
+        this.satOrder = payload.sat_order || [];
+        if (payload.nodes) {
+            for (const [nodeId, meta] of Object.entries(payload.nodes)) {
+                if (meta.type === 'satellite' && meta.orbit) {
+                    this.satAltM[nodeId] =
+                        (meta.orbit.altitude_km || 550) * 1000;
+                }
+            }
+        }
+        if (payload.packet_model) {
+            this.queueCapacityPkts =
+                payload.packet_model.queue_capacity_pkts || 0;
+        }
+        // Static ISL mesh only for small constellations (cheap to draw all
+        // 2N links); at thousand-sat scale ISLs render only when active.
+        this.pendingISLMesh =
+            (this.satOrder.length > 0 && this.satOrder.length <= 200)
+                ? (payload.isl_topology || [])
+                : null;
 
         // Parse nodes
         if (payload.nodes) {
@@ -152,15 +188,21 @@ class SatelliteVisualizationApp {
         try {
             this.cesium.beginBatch();
 
-            // Update all node positions
-            if (payload.positions) {
-                this.updatePositions(payload.positions);
+            // Protocol 3.1: rebuild full positions from the compact sat_pos
+            // array (satellites) plus the dynamic-node positions dict.
+            this.updatePositions(this._rebuildPositions(payload));
+
+            // Build the static ISL mesh once, after satellite entities exist.
+            if (this.pendingISLMesh) {
+                this.cesium.setStaticISLMesh(this.pendingISLMesh);
+                this.pendingISLMesh = null;
             }
 
-            // Sync links (add new, update existing, remove stale)
-            if (payload.links) {
-                this.cesium.syncLinks(payload.links);
-            }
+            // Protocol 3.1: merge short-key link deltas into the client-side
+            // cache, then sync the full active set (idle links are omitted by
+            // the core, so they simply never enter the cache).
+            this._mergeLinks(payload);
+            this.cesium.syncLinks(this.linkCache);
 
             this.cesium.endBatch();
 
@@ -175,9 +217,11 @@ class SatelliteVisualizationApp {
                 this.ui.pushCharts(payload.timestamp, payload.metrics_summary);
             }
 
-            // Protocol v3: per-node packet telemetry
+            // Protocol v3: per-node packet telemetry. Protocol 3.1 only
+            // includes window-active nodes, so merge rather than replace to
+            // keep the last known metrics for currently-quiet nodes.
             if (payload.node_metrics) {
-                this.nodeMetrics = payload.node_metrics;
+                Object.assign(this.nodeMetrics, payload.node_metrics);
             }
 
             // Live-refresh the open detail panel (link or node)
@@ -211,6 +255,82 @@ class SatelliteVisualizationApp {
                 heading: pos.heading,
             });
         }
+    }
+
+    // ==================================================================
+    // Protocol 3.1 helpers (compact state frames)
+    // ==================================================================
+
+    /**
+     * Rebuild the full positions dict from a 3.1 frame: satellites travel as
+     * a compact sat_pos array ([[lat, lon], ...] aligned to sat_order, with
+     * constant altitude from init); UAVs / ships arrive in `positions`.
+     */
+    _rebuildPositions(payload) {
+        const positions = {};
+        const sp = payload.sat_pos;
+        if (sp && this.satOrder.length) {
+            const n = Math.min(sp.length, this.satOrder.length);
+            for (let i = 0; i < n; i++) {
+                const id = this.satOrder[i];
+                positions[id] = {
+                    lat: sp[i][0],
+                    lon: sp[i][1],
+                    alt: this.satAltM[id] || 550000,
+                };
+            }
+        }
+        if (payload.positions) {
+            Object.assign(positions, payload.positions);
+        }
+        return positions;
+    }
+
+    /**
+     * Merge a 3.1 link delta into the client-side active-link cache.
+     * `links_full` marks a complete resync (discard everything first);
+     * `links_removed` lists keys to prune between full frames.
+     */
+    _mergeLinks(payload) {
+        if (payload.links_full) {
+            this.linkCache = {};
+        }
+        const links = payload.links;
+        if (links) {
+            for (const key in links) {
+                this.linkCache[key] = this._expandLink(key, links[key]);
+            }
+        }
+        const removed = payload.links_removed;
+        if (removed && removed.length) {
+            for (const key of removed) {
+                delete this.linkCache[key];
+            }
+        }
+    }
+
+    /**
+     * Expand a short-key link record {t,u,l,d,tx,q,p} into the long-form
+     * shape consumed by CesiumManager.syncLinks / UIController link detail.
+     */
+    _expandLink(key, v) {
+        const dash = key.indexOf('--');
+        const lt = this.linkTypes[v.t] || {};
+        return {
+            type: v.t,
+            source: dash >= 0 ? key.slice(0, dash) : key,
+            target: dash >= 0 ? key.slice(dash + 2) : '',
+            is_active: true,
+            bandwidth_utilization: v.u || 0,
+            latency_ms: v.l || 0,
+            loss_rate: v.d || 0,
+            tx_bps: v.tx || 0,
+            capacity_bps: lt.capacity_bps || 0,
+            queue_depth: v.q || 0,
+            // Every undirected link aggregates two directed ports.
+            queue_capacity: this.queueCapacityPkts * 2,
+            propagation_ms: v.p || 0,
+        };
     }
 
     /**
