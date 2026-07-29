@@ -60,6 +60,9 @@ class SatelliteVisualizationApp {
             this.ui.initializeUI();
             this.ui.loadCesiumToken();
 
+            // Route 3D picks (link/node) to the detail panel
+            this.cesium.onSelect = (info) => this.handleSelection(info);
+
             // Connect WebSocket after Cesium renders first frame
             this.cesium.scene.postRender.addEventListener(() => {
                 if (!this._wsConnected) {
@@ -92,6 +95,7 @@ class SatelliteVisualizationApp {
         this.nodeTypeMap.clear();
         this.nodeMetadata = {};
         this.currentRoute = null;
+        this.ui.hideDetail();
 
         // Duration & timeline
         if (payload.duration) {
@@ -167,6 +171,9 @@ class SatelliteVisualizationApp {
                 this.ui.updateMetricsSummary(payload.metrics_summary);
             }
 
+            // Live-refresh the open detail panel (link or node)
+            this.refreshDetailPanel();
+
             // Simulation time — only update display when user isn't dragging
             if (payload.timestamp != null) {
                 this.simulationTime = payload.timestamp;
@@ -210,6 +217,52 @@ class SatelliteVisualizationApp {
         } else if (!routing.highlight_path && this.currentRoute) {
             this.currentRoute = null;
             this.cesium.clearRouteHighlights();
+        }
+    }
+
+    // ==================================================================
+    // Selection → detail panel
+    // ==================================================================
+
+    /**
+     * Handle a 3D pick emitted by CesiumManager.onSelect.
+     * info: {kind:'link',...} | {kind:'node',...} | null
+     */
+    handleSelection(info) {
+        if (!info) {
+            this.ui.hideDetail();
+            return;
+        }
+        if (info.kind === 'link') {
+            this.ui.showLinkDetail(info);
+        } else if (info.kind === 'node') {
+            this.ui.showNodeDetail(info);
+        }
+    }
+
+    /**
+     * Refresh the currently open detail panel with the latest live data.
+     * Called on every state_update so metrics stay current.
+     */
+    refreshDetailPanel() {
+        const kind = this.ui.detailKind;
+        const id = this.ui.detailId;
+        if (!kind || !id) return;
+
+        if (kind === 'link') {
+            const data = this.cesium.getLinkData(id);
+            if (data) {
+                this.ui.updateLinkDetail(data);
+            } else {
+                // Link disappeared (e.g. dropped) — close the panel
+                this.ui.hideDetail();
+                this.cesium.clearSelection();
+            }
+        } else if (kind === 'node') {
+            const data = this.cesium.getNodeData(id);
+            if (data) {
+                this.ui.updateNodeDetail(data);
+            }
         }
     }
 

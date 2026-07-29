@@ -1,667 +1,417 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Satellite Network Visualization</title>
+    <title>空天海多域网络可视化</title>
 
     <!-- CesiumJS 1.141 -->
     <script src="https://cesium.com/downloads/cesiumjs/releases/1.141/Build/Cesium/Cesium.js"></script>
     <link href="https://cesium.com/downloads/cesiumjs/releases/1.141/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
 
     <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+        :root {
+            --bg-glass: rgba(13, 17, 28, 0.82);
+            --bg-glass-hover: rgba(20, 26, 42, 0.9);
+            --border: rgba(255, 255, 255, 0.08);
+            --accent: #38bdf8;
+            --text: #e6edf3;
+            --text-dim: #8b98a9;
+            --good: #34d399;
+            --warn: #fbbf24;
+            --bad: #f87171;
+            --radius: 12px;
         }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
 
         html, body {
             height: 100%;
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
             overflow: hidden;
+            background: #000;
+            color: var(--text);
         }
 
-        #cesiumContainer {
-            width: 100%;
-            height: 100%;
-            position: relative;
-        }
+        #cesiumContainer { width: 100%; height: 100%; position: relative; }
 
-        /* Info banner at top-left */
-        #infoBanner {
+        /* Hide Cesium default credit container clutter */
+        .cesium-viewer-bottom { display: none; }
+
+        /* ---------- Glass panel base ---------- */
+        .glass {
             position: absolute;
-            top: 10px;
-            left: 10px;
-            background: rgba(0, 0, 0, 0.75);
-            color: #ccc;
-            padding: 8px 14px;
-            border-radius: 4px;
-            z-index: 10;
-            font-size: 12px;
-            pointer-events: none;
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            backdrop-filter: blur(14px);
+            -webkit-backdrop-filter: blur(14px);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+            z-index: 20;
+            color: var(--text);
         }
 
-        /* Control Panel */
-        #controlPanel {
+        /* ---------- Top bar ---------- */
+        #topBar {
             position: absolute;
-            top: 10px;
-            right: 10px;
-            width: 340px;
-            background: rgba(0, 0, 0, 0.82);
-            color: #fff;
-            padding: 14px;
-            border-radius: 6px;
-            z-index: 10;
-            box-shadow: 0 0 12px rgba(0, 0, 0, 0.6);
-            font-size: 12.5px;
-            max-height: calc(100vh - 20px);
-            overflow-y: auto;
-        }
-
-        .control-section {
-            margin-bottom: 14px;
-            padding-bottom: 14px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-        }
-
-        .control-section:last-child {
-            border-bottom: none;
-            margin-bottom: 0;
-            padding-bottom: 0;
-        }
-
-        .control-label {
-            font-weight: 600;
-            margin-bottom: 6px;
-            display: block;
-            color: #ddd;
-            font-size: 12px;
-        }
-
-        /* Mode buttons */
-        .mode-selector {
-            display: flex;
-            gap: 5px;
-        }
-
-        .mode-btn {
-            flex: 1;
-            padding: 7px 10px;
-            border: 2px solid #555;
-            background: rgba(255, 255, 255, 0.08);
-            color: #ccc;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: all 0.2s;
-        }
-
-        .mode-btn.active {
-            background: #2196F3;
-            border-color: #2196F3;
-            color: #fff;
-        }
-
-        .mode-btn:hover {
-            background: rgba(255, 255, 255, 0.15);
-        }
-
-        /* Buttons */
-        button {
-            padding: 7px 10px;
-            background: #2196F3;
-            color: #fff;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-            transition: background 0.2s;
-            width: 100%;
-            margin-bottom: 6px;
-        }
-
-        button:hover {
-            background: #1976D2;
-        }
-
-        button:disabled {
-            background: #777;
-            cursor: not-allowed;
-        }
-
-        button.danger {
-            background: #f44336;
-        }
-
-        button.danger:hover {
-            background: #da190b;
-        }
-
-        /* Range slider */
-        input[type="range"] {
-            width: 100%;
-            height: 6px;
-            border-radius: 3px;
-            background: #555;
-            outline: none;
-            -webkit-appearance: none;
-            cursor: pointer;
-        }
-
-        input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: #2196F3;
-            cursor: pointer;
-        }
-
-        input[type="range"]::-moz-range-thumb {
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: #2196F3;
-            cursor: pointer;
-            border: none;
-        }
-
-        /* Selects */
-        select {
-            width: 100%;
-            padding: 7px;
-            background: rgba(255, 255, 255, 0.08);
-            color: #fff;
-            border: 1px solid #555;
-            border-radius: 4px;
-            margin-bottom: 6px;
-            font-size: 12px;
-            cursor: pointer;
-        }
-
-        select option {
-            background: #333;
-            color: #fff;
-        }
-
-        /* Text/number inputs */
-        input[type="text"],
-        input[type="number"] {
-            width: 100%;
-            padding: 7px;
-            background: rgba(255, 255, 255, 0.08);
-            color: #fff;
-            border: 1px solid #555;
-            border-radius: 4px;
-            margin-bottom: 6px;
-            font-size: 12px;
-        }
-
-        input[type="text"]::placeholder,
-        input[type="number"]::placeholder {
-            color: #888;
-        }
-
-        /* Info rows */
-        .info-row {
+            top: 14px; left: 14px; right: 14px;
             display: flex;
             justify-content: space-between;
-            margin: 5px 0;
+            align-items: center;
+            z-index: 20;
+            pointer-events: none;
+        }
+        #brand {
+            pointer-events: auto;
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            backdrop-filter: blur(14px);
+            padding: 9px 16px;
+            font-size: 14px;
+            font-weight: 600;
+            letter-spacing: 0.5px;
+        }
+        #brand .sub {
+            font-size: 11px;
+            font-weight: 400;
+            color: var(--text-dim);
+            margin-left: 8px;
+        }
+        #connChip {
+            pointer-events: auto;
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            backdrop-filter: blur(14px);
+            padding: 7px 14px;
             font-size: 12px;
-        }
-
-        .info-label {
-            color: #aaa;
-        }
-
-        .info-value {
-            color: #fff;
-            font-weight: 500;
-        }
-
-        /* Status indicator */
-        .status-indicator {
-            display: inline-block;
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            margin-right: 6px;
-        }
-
-        .status-connected {
-            background: #4caf50;
-            box-shadow: 0 0 4px #4caf50;
-        }
-
-        .status-disconnected {
-            background: #f44336;
-            box-shadow: 0 0 4px #f44336;
-        }
-
-        /* Timeline */
-        #timelineContainer {
-            margin: 8px 0;
-        }
-
-        /* Filter section */
-        .filter-list {
-            max-height: 140px;
-            overflow-y: auto;
-            background: rgba(255, 255, 255, 0.04);
-            padding: 6px;
-            border-radius: 4px;
-            margin-bottom: 6px;
-        }
-
-        .filter-item {
             display: flex;
             align-items: center;
-            margin-bottom: 4px;
-            font-size: 11.5px;
+            gap: 7px;
         }
-
-        .filter-item input[type="checkbox"] {
-            margin-right: 6px;
-            cursor: pointer;
+        .dot {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: var(--bad);
+            box-shadow: 0 0 6px var(--bad);
         }
+        .dot.on { background: var(--good); box-shadow: 0 0 6px var(--good); }
 
-        .filter-item label {
-            cursor: pointer;
+        /* ---------- Side panels (layers / stats / detail) ---------- */
+        .side-panel {
+            width: 230px;
             overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            transition: transform 0.28s cubic-bezier(.4,0,.2,1), opacity 0.28s;
         }
+        #layersPanel { left: 14px; top: 70px; }
+        #statsPanel  { right: 14px; top: 70px; }
+        #detailPanel { right: 14px; top: 70px; width: 280px; display: none; }
 
-        /* Speed display */
-        #speedDisplay {
-            text-align: center;
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 11px 14px;
+            font-size: 12.5px;
             font-weight: 600;
-            color: #2196F3;
-            margin-top: 4px;
+            color: var(--text);
+            border-bottom: 1px solid var(--border);
+            user-select: none;
         }
-
-        /* Connection status */
-        .connection-status {
-            padding: 7px;
-            border-radius: 4px;
-            background: rgba(255, 255, 255, 0.04);
-            margin-bottom: 10px;
-            font-size: 12px;
+        .panel-header .collapse-btn {
+            background: none; border: none; color: var(--text-dim);
+            cursor: pointer; font-size: 15px; line-height: 1;
+            padding: 2px 4px; border-radius: 4px;
         }
+        .panel-header .collapse-btn:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+        .panel-body { padding: 12px 14px; }
 
-        /* Token status */
-        .token-status {
-            font-size: 11px;
-            margin-top: 4px;
-        }
+        .side-panel.collapsed .panel-body { display: none; }
+        .side-panel.collapsed { width: auto; }
 
-        /* Scrollbar styling */
-        #controlPanel::-webkit-scrollbar {
-            width: 5px;
-        }
-
-        #controlPanel::-webkit-scrollbar-track {
-            background: rgba(255, 255, 255, 0.05);
-        }
-
-        #controlPanel::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.2);
-            border-radius: 3px;
-        }
-
-        .filter-list::-webkit-scrollbar {
-            width: 4px;
-        }
-
-        .filter-list::-webkit-scrollbar-track {
-            background: transparent;
-        }
-
-        .filter-list::-webkit-scrollbar-thumb {
-            background: rgba(255, 255, 255, 0.15);
-            border-radius: 2px;
-        }
-
-        /* Metrics color legend — centered at top */
-        #metricsLegend {
+        /* Re-open tab shown when collapsed */
+        .reopen-tab {
             position: absolute;
-            top: 10px;
+            top: 70px;
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            backdrop-filter: blur(14px);
+            padding: 8px 10px;
+            cursor: pointer;
+            z-index: 19;
+            font-size: 13px;
+            color: var(--text-dim);
+            display: none;
+        }
+        .reopen-tab:hover { color: var(--text); }
+        #layersReopen { left: 14px; }
+        #statsReopen  { right: 14px; }
+
+        /* ---------- Layer legend items ---------- */
+        .layer-group-label {
+            font-size: 10.5px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: var(--text-dim);
+            margin: 10px 0 6px;
+        }
+        .layer-group-label:first-child { margin-top: 0; }
+        .layer-item {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 5px 6px;
+            border-radius: 7px;
+            cursor: pointer;
+            font-size: 12.5px;
+            transition: background 0.15s;
+        }
+        .layer-item:hover { background: rgba(255,255,255,0.06); }
+        .layer-item input { display: none; }
+        .layer-item .swatch {
+            width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0;
+            box-shadow: 0 0 5px rgba(0,0,0,0.4);
+            position: relative;
+        }
+        .layer-item .swatch.line { height: 3px; border-radius: 2px; width: 16px; }
+        .layer-item input:not(:checked) ~ .swatch { opacity: 0.25; }
+        .layer-item input:not(:checked) ~ .lbl { color: var(--text-dim); text-decoration: line-through; }
+        .layer-item .lbl { flex: 1; }
+
+        /* ---------- Stats ---------- */
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12.5px;
+            padding: 3.5px 0;
+        }
+        .stat-row .k { color: var(--text-dim); }
+        .stat-row .v { font-weight: 600; font-variant-numeric: tabular-nums; }
+        #metricsSummary {
+            margin-top: 9px;
+            padding-top: 9px;
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            line-height: 1.6;
+            color: var(--text-dim);
+        }
+
+        /* ---------- Detail panel ---------- */
+        .detail-type-badge {
+            display: inline-block;
+            padding: 3px 10px;
+            border-radius: 999px;
+            font-size: 11px;
+            font-weight: 600;
+            margin-bottom: 10px;
+        }
+        .detail-endpoints {
+            font-size: 12.5px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 8px;
+            padding: 8px 10px;
+            margin-bottom: 12px;
+            line-height: 1.5;
+            word-break: break-all;
+        }
+        .detail-endpoints .arrow { color: var(--accent); margin: 0 6px; }
+        .metric-block { margin-bottom: 11px; }
+        .metric-block .metric-label {
+            display: flex; justify-content: space-between;
+            font-size: 11.5px; color: var(--text-dim); margin-bottom: 5px;
+        }
+        .metric-block .metric-label .mv { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+        .progress-track {
+            height: 6px; border-radius: 3px;
+            background: rgba(255,255,255,0.1);
+            overflow: hidden;
+        }
+        .progress-fill {
+            height: 100%; border-radius: 3px;
+            background: linear-gradient(90deg, var(--good), var(--warn), var(--bad));
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+        .detail-status {
+            display: flex; align-items: center; gap: 7px;
+            font-size: 12px; margin-top: 4px;
+        }
+
+        /* ---------- Bottom playback bar ---------- */
+        #playbackBar {
             left: 50%;
             transform: translateX(-50%);
-            z-index: 10;
-            background: rgba(0, 0, 0, 0.82);
-            color: #ccc;
-            padding: 8px 14px 6px;
-            border-radius: 4px;
-            font-size: 11px;
-            text-align: center;
-            pointer-events: none;
-            min-width: 300px;
-        }
-        #legendTitle {
-            font-weight: 600;
-            margin-bottom: 6px;
-            color: #ddd;
-        }
-        #legendBarWrap {
-            position: relative;
-            padding: 0 2px;
-        }
-        #legendBar {
-            height: 10px;
-            border-radius: 5px;
-            background: linear-gradient(to right, #4caf50, #ffeb3b, #f44336);
-        }
-        #legendTicks {
-            position: relative;
-            height: 18px;
-            margin-top: 2px;
-        }
-        .legend-tick {
-            position: absolute;
-            transform: translateX(-50%);
-            color: #aaa;
-            font-size: 10px;
-            white-space: nowrap;
-        }
-        .legend-tick::before {
-            content: '';
-            display: block;
-            width: 1px;
-            height: 6px;
-            background: #888;
-            margin: 0 auto 2px;
-        }
-
-        /* Legend / type visibility */
-        .legend-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 4px 10px;
-        }
-
-        .legend-item {
+            bottom: 22px;
             display: flex;
             align-items: center;
-            gap: 5px;
-            font-size: 11.5px;
-            cursor: pointer;
-            color: #ccc;
+            gap: 12px;
+            padding: 10px 16px;
+            width: min(680px, calc(100vw - 40px));
         }
-
-        .legend-item input[type="checkbox"] {
-            margin: 0;
+        .pb-btn {
+            width: 36px; height: 36px;
+            border-radius: 50%;
+            border: none;
+            background: rgba(255,255,255,0.1);
+            color: var(--text);
             cursor: pointer;
-        }
-
-        .swatch {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 2px;
+            font-size: 14px;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.15s, transform 0.1s;
             flex-shrink: 0;
         }
+        .pb-btn:hover { background: rgba(255,255,255,0.2); }
+        .pb-btn:active { transform: scale(0.94); }
+        .pb-btn.primary { background: var(--accent); color: #04121f; }
+        .pb-btn.primary:hover { background: #67d3fb; }
 
-        /* Responsive */
-        @media (max-width: 800px) {
-            #controlPanel {
-                width: 280px;
-                font-size: 11px;
-                padding: 10px;
-            }
+        #simTime {
+            font-size: 13px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            min-width: 52px;
+            text-align: center;
+            color: var(--accent);
         }
+
+        #timelineSlider { flex: 1; min-width: 80px; }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            height: 5px;
+            border-radius: 3px;
+            background: rgba(255,255,255,0.15);
+            outline: none;
+            cursor: pointer;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px; height: 14px; border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 6px rgba(56,189,248,0.6);
+            cursor: pointer;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 14px; height: 14px; border-radius: 50%;
+            background: var(--accent); border: none; cursor: pointer;
+        }
+
+        #speedSelect {
+            background: rgba(255,255,255,0.1);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px 8px;
+            font-size: 12px;
+            cursor: pointer;
+            flex-shrink: 0;
+        }
+        #speedSelect option { background: #161b27; }
+
+        /* ---------- Hint toast ---------- */
+        #hintToast {
+            position: absolute;
+            left: 50%;
+            transform: translateX(-50%);
+            bottom: 86px;
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 7px 16px;
+            font-size: 12px;
+            color: var(--text-dim);
+            z-index: 18;
+            backdrop-filter: blur(14px);
+            pointer-events: none;
+            opacity: 1;
+            transition: opacity 0.6s;
+        }
+        #hintToast.hide { opacity: 0; }
     </style>
 </head>
 <body>
     <div id="cesiumContainer"></div>
 
-    <!-- Info banner (non-interactive) -->
-    <div id="infoBanner">
-        空天海多域网络可视化 | CesiumJS 1.141 | Protocol v2
-    </div>
-
-    <!-- Metrics color legend bar -->
-    <div id="metricsLegend" style="display:none;">
-        <div id="legendTitle">Bandwidth Utilization</div>
-        <div id="legendBarWrap"><div id="legendBar"></div></div>
-        <div id="legendTicks"></div>
-    </div>
-
-    <!-- Control Panel -->
-    <div id="controlPanel">
-        <!-- Connection Status -->
-        <div class="connection-status">
-            <div class="info-row">
-                <span class="info-label">Connection:</span>
-                <span>
-                    <span class="status-indicator status-disconnected" id="connectionIndicator"></span>
-                    <span id="connectionStatus">Disconnected</span>
-                </span>
-            </div>
-        </div>
-
-        <!-- Mode Selection -->
-        <div class="control-section">
-            <label class="control-label">Visualization Mode</label>
-            <div class="mode-selector">
-                <button class="mode-btn active" id="modeRealtime">Realtime</button>
-                <button class="mode-btn" id="modeOffline">Offline</button>
-            </div>
-        </div>
-
-        <!-- ======================== -->
-        <!-- Realtime Controls        -->
-        <!-- ======================== -->
-        <div id="realtimeControls">
-            <!-- Playback Control -->
-            <div class="control-section">
-                <label class="control-label">Playback</label>
-                <div style="display: flex; gap: 5px;">
-                    <button id="playPauseBtn" style="flex: 2;">▶ Play</button>
-                    <button id="stopBtn" style="flex: 1;">⏹ Stop</button>
-                    <button id="resetBtn" style="flex: 1;">↻ Reset</button>
-                </div>
-            </div>
-
-            <!-- Speed Control -->
-            <div class="control-section">
-                <label class="control-label">Speed Multiplier</label>
-                <input type="range" id="speedSlider" min="0.1" max="10" step="0.1" value="1">
-                <div id="speedDisplay">1.0x</div>
-            </div>
-
-            <!-- Timeline Control -->
-            <div class="control-section">
-                <label class="control-label">Timeline</label>
-                <div id="timelineContainer">
-                    <input type="range" id="timelineSlider" min="0" max="100" value="0" style="width: 100%; margin-bottom: 4px;">
-                    <div style="display: flex; gap: 6px; align-items: center;">
-                        <input type="number" id="timelineInput" min="0" step="1" placeholder="Jump to..." style="flex: 1; margin-bottom: 0;">
-                        <span class="info-value" id="simTime" style="flex: 1; text-align: right; white-space: nowrap;">0s</span>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Metrics Selection -->
-            <div class="control-section">
-                <label class="control-label">Metrics Display</label>
-                <select id="metricsSelect">
-                    <option value="none">None</option>
-                    <option value="bandwidth">Bandwidth Utilization</option>
-                    <option value="latency">Latency</option>
-                    <option value="loss_rate">Packet Loss Rate</option>
-                    <option value="link_status">Link Status (Active/Inactive)</option>
-                </select>
-            </div>
-
-            <!-- Type Visibility & Legend -->
-            <div class="control-section">
-                <label class="control-label">Type Visibility</label>
-                <div class="legend-grid">
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleSatellite" checked>
-                        <span class="swatch" style="background:#1E90FF;"></span> Satellite
-                    </label>
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleUav" checked>
-                        <span class="swatch" style="background:#32CD32;"></span> UAV
-                    </label>
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleShip" checked>
-                        <span class="swatch" style="background:#FFA500;"></span> Ship
-                    </label>
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleGroundStation" checked>
-                        <span class="swatch" style="background:#FF4500;"></span> Ground Station
-                    </label>
-                </div>
-                <label class="control-label" style="margin-top:8px;">Link Types</label>
-                <div class="legend-grid">
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleISL" checked>
-                        <span class="swatch" style="background:#4FC3F7;"></span> ISL 星间
-                    </label>
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleGSL" checked>
-                        <span class="swatch" style="background:#FF8A65;"></span> GSL 地面
-                    </label>
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleSUL" checked>
-                        <span class="swatch" style="background:#81C784;"></span> SUL 无人机
-                    </label>
-                    <label class="legend-item">
-                        <input type="checkbox" id="toggleSSL" checked>
-                        <span class="swatch" style="background:#FFB74D;"></span> SSL 船舶
-                    </label>
-                </div>
-            </div>
-
-            <!-- Constellation Selection -->
-            <div class="control-section">
-                <label class="control-label">Constellation</label>
-                <select id="constellationSelect">
-                    <option value="Starlink">Starlink</option>
-                    <option value="Kuiper">Kuiper</option>
-                    <option value="Telesat">Telesat</option>
-                </select>
-                <select id="shellSelect">
-                    <option value="0">Shell 0</option>
-                </select>
-                <div style="font-size: 11px; color: #888; margin-top: 4px;" id="constellationInfo">Waiting for data...</div>
-            </div>
-
-            <!-- Scenario Selection -->
-            <div class="control-section">
-                <label class="control-label">Simulation Scenario</label>
-                <select id="scenarioSelect">
-                    <option value="ideal">Ideal Clear Sky</option>
-                    <option value="commercial" selected>Commercial Service</option>
-                    <option value="weather">Moderate Weather</option>
-                    <option value="handover">Frequent Handover</option>
-                    <option value="extreme">Extreme Conditions</option>
-                </select>
-                <div style="font-size: 11px; color: #888; margin-top: 4px;" id="scenarioInfo">Avg loss: 1.0% | Jitter: 0.5%–4.0%</div>
-            </div>
-
-            <!-- Satellite Filter -->
-            <div class="control-section">
-                <label class="control-label">Satellite Filter</label>
-                <input type="text" id="satelliteSearch" placeholder="Search satellite...">
-                <div class="filter-list" id="satelliteFilterList">
-                    <div style="color: #888; text-align: center; padding: 10px;">Waiting for data...</div>
-                </div>
-                <div style="display: flex; gap: 5px;">
-                    <button id="selectAllSatellites" style="flex: 1;">Select All</button>
-                    <button id="deselectAllSatellites" class="danger" style="flex: 1;">Deselect All</button>
-                </div>
-            </div>
-
-            <!-- Ground Station / UAV / Ship Filter -->
-            <div class="control-section">
-                <label class="control-label">Node Filter (GS / UAV / Ship)</label>
-                <input type="text" id="stationSearch" placeholder="Search node...">
-                <div class="filter-list" id="stationFilterList">
-                    <div style="color: #888; text-align: center; padding: 10px;">Waiting for data...</div>
-                </div>
-                <div style="display: flex; gap: 5px;">
-                    <button id="selectAllStations" style="flex: 1;">Select All</button>
-                    <button id="deselectAllStations" class="danger" style="flex: 1;">Deselect All</button>
-                </div>
-            </div>
-
-            <!-- Statistics -->
-            <div class="control-section">
-                <label class="control-label">Statistics</label>
-                <div class="info-row">
-                    <span class="info-label">Satellites:</span>
-                    <span class="info-value" id="satCount">0</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">UAVs:</span>
-                    <span class="info-value" id="uavCount">0</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Ships:</span>
-                    <span class="info-value" id="shipCount">0</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Ground Stations:</span>
-                    <span class="info-value" id="staCount">0</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">Links:</span>
-                    <span class="info-value" id="linkCount">0</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">FPS:</span>
-                    <span class="info-value" id="fpsCounter">0 FPS</span>
-                </div>
-                <div style="font-size: 11px; color: #aaa; margin-top: 6px;" id="metricsSummary">Waiting for data...</div>
-            </div>
-        </div>
-
-        <!-- ======================== -->
-        <!-- Offline Controls         -->
-        <!-- ======================== -->
-        <div id="offlineControls" style="display: none;">
-            <div class="control-section">
-                <label class="control-label">Cesium Ion Access Token</label>
-                <input type="text" id="cesiumToken" placeholder="Enter your Cesium Ion token...">
-                <div class="token-status">
-                    <span id="tokenStatus" style="color: #888;">Not set</span>
-                </div>
-                <button id="saveCesiumToken" style="margin-top: 6px;">Save Token</button>
-            </div>
-
-            <div class="control-section">
-                <label class="control-label">Offline CZML Data</label>
-                <input type="text" id="czmlFilePath" placeholder="URL or path to CZML file...">
-                <div style="display: flex; gap: 5px;">
-                    <button id="loadOfflineData" style="flex: 1;">Load from URL</button>
-                    <button id="loadCzmlFromLocal" style="flex: 1;">Open Local File</button>
-                </div>
-                <div style="margin-top: 6px; font-size: 11px;">
-                    <span id="offlineStatus" style="color: #888;">Idle</span>
-                </div>
-            </div>
-
-            <div class="control-section" style="border-bottom: none;">
-                <label class="control-label">How to get a Cesium Ion token</label>
-                <ol style="font-size: 11px; color: #aaa; padding-left: 16px; line-height: 1.6;">
-                    <li>Go to <a href="https://ion.cesium.com/signup" target="_blank" style="color: #2196F3;">ion.cesium.com</a></li>
-                    <li>Sign up for a free account</li>
-                    <li>Go to "Access Tokens" tab</li>
-                    <li>Copy your default token and paste above</li>
-                </ol>
-            </div>
+    <!-- Top bar -->
+    <div id="topBar">
+        <div id="brand">空天海多域网络可视化<span class="sub">CesiumJS 1.141 · Protocol v2</span></div>
+        <div id="connChip">
+            <span class="dot" id="connectionIndicator"></span>
+            <span id="connectionStatus">未连接</span>
         </div>
     </div>
+
+    <!-- Layers panel (left) -->
+    <div id="layersPanel" class="glass side-panel">
+        <div class="panel-header">
+            <span>图层</span>
+            <button class="collapse-btn" id="layersCollapse" title="收起">‹</button>
+        </div>
+        <div class="panel-body">
+            <div class="layer-group-label">节点</div>
+            <label class="layer-item"><input type="checkbox" id="toggleSatellite" checked><span class="swatch" style="background:#1E90FF"></span><span class="lbl">卫星</span></label>
+            <label class="layer-item"><input type="checkbox" id="toggleUav" checked><span class="swatch" style="background:#32CD32"></span><span class="lbl">无人机</span></label>
+            <label class="layer-item"><input type="checkbox" id="toggleShip" checked><span class="swatch" style="background:#FFA500"></span><span class="lbl">船舶</span></label>
+            <label class="layer-item"><input type="checkbox" id="toggleGroundStation" checked><span class="swatch" style="background:#FF4500"></span><span class="lbl">地面站</span></label>
+            <div class="layer-group-label">链路</div>
+            <label class="layer-item"><input type="checkbox" id="toggleISL" checked><span class="swatch line" style="background:#4FC3F7"></span><span class="lbl">ISL 星间</span></label>
+            <label class="layer-item"><input type="checkbox" id="toggleGSL" checked><span class="swatch line" style="background:#FF8A65"></span><span class="lbl">GSL 地面</span></label>
+            <label class="layer-item"><input type="checkbox" id="toggleSUL" checked><span class="swatch line" style="background:#81C784"></span><span class="lbl">SUL 无人机</span></label>
+            <label class="layer-item"><input type="checkbox" id="toggleSSL" checked><span class="swatch line" style="background:#FFB74D"></span><span class="lbl">SSL 船舶</span></label>
+        </div>
+    </div>
+    <div id="layersReopen" class="reopen-tab" title="展开图层">☰</div>
+
+    <!-- Stats panel (right) -->
+    <div id="statsPanel" class="glass side-panel">
+        <div class="panel-header">
+            <span>统计</span>
+            <button class="collapse-btn" id="statsCollapse" title="收起">›</button>
+        </div>
+        <div class="panel-body">
+            <div class="stat-row"><span class="k">卫星</span><span class="v" id="satCount">0</span></div>
+            <div class="stat-row"><span class="k">无人机</span><span class="v" id="uavCount">0</span></div>
+            <div class="stat-row"><span class="k">船舶</span><span class="v" id="shipCount">0</span></div>
+            <div class="stat-row"><span class="k">地面站</span><span class="v" id="staCount">0</span></div>
+            <div class="stat-row"><span class="k">链路</span><span class="v" id="linkCount">0</span></div>
+            <div class="stat-row"><span class="k">帧率</span><span class="v" id="fpsCounter">0</span></div>
+            <div id="metricsSummary">等待数据…</div>
+        </div>
+    </div>
+    <div id="statsReopen" class="reopen-tab" title="展开统计">📊</div>
+
+    <!-- Detail panel (right, shown on selection) -->
+    <div id="detailPanel" class="glass side-panel">
+        <div class="panel-header">
+            <span id="detailTitle">详情</span>
+            <button class="collapse-btn" id="detailClose" title="关闭">×</button>
+        </div>
+        <div class="panel-body" id="detailBody"></div>
+    </div>
+
+    <!-- Bottom playback bar -->
+    <div id="playbackBar" class="glass">
+        <button class="pb-btn primary" id="playPauseBtn" title="播放/暂停">▶</button>
+        <button class="pb-btn" id="stopBtn" title="停止">⏹</button>
+        <span id="simTime">0s</span>
+        <input type="range" id="timelineSlider" min="0" max="600" value="0" step="1">
+        <select id="speedSelect" title="播放速度">
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1x</option>
+            <option value="2">2x</option>
+            <option value="5">5x</option>
+            <option value="10">10x</option>
+        </select>
+    </div>
+
+    <!-- Hint toast -->
+    <div id="hintToast">点击链路或节点查看实时状态 · 右键取消选择</div>
 
     <!-- JavaScript Modules -->
-    <script src="../js/websocket.js?v=2a1"></script>
-    <script src="../js/cesium-manager.js?v=2a1"></script>
-    <script src="../js/ui-controller.js?v=2a1"></script>
-    <script src="../js/app.js?v=2a1"></script>
+    <script src="../js/websocket.js?v=3a0"></script>
+    <script src="../js/cesium-manager.js?v=3a0"></script>
+    <script src="../js/ui-controller.js?v=3a0"></script>
+    <script src="../js/app.js?v=3a0"></script>
 </body>
 </html>

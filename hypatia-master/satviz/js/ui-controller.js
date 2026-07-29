@@ -1,6 +1,8 @@
 /**
- * UI Controller Module
- * Handles user interface interactions
+ * UI Controller Module v3 — Minimal floating-panel UI
+ * Full-screen globe + collapsible layers/stats panels + link/node detail
+ * panel + bottom playback bar. v1 legacy controls (constellation/scenario/
+ * per-node filter lists/offline CZML) removed.
  */
 
 class UIController {
@@ -9,250 +11,166 @@ class UIController {
         this.ws = websocketManager;
         this.app = app;
         this.isPlaying = false;
-        this.currentMode = 'realtime';
-        this.selectedMetrics = 'none';
-        this.selectedSatellites = new Set();
-        this.selectedStations = new Set();
 
         // Timeline: guard against state_update overwriting a user drag
         this.isUserSeeking = false;
         this._lastTimeInt = -1;          // only touch DOM when whole second changes
         this._lastMetricsUpdate = 0;     // throttle metrics summary repaints
 
-        this.scenarioInfo = {
-            ideal:       'Avg loss: 0.1% | Jitter: 0.05%–0.5%',
-            commercial:  'Avg loss: 1.0% | Jitter: 0.5%–4.0%',
-            weather:     'Avg loss: 2.0% | Jitter: 1.0%–6.0%',
-            handover:    'Avg loss: 3.0% | Jitter: 0.5%–10.0%',
-            extreme:     'Avg loss: 5.0% | Jitter: 1.0%–15.0%',
-        };
+        // Detail panel state
+        this._detailKind = null;         // 'link' | 'node' | null
+        this._detailId = null;           // linkId or nodeId currently shown
 
-        // Shell metadata for building dropdown options (full-scale params)
-        this._shellMeta = {
-            Starlink: [
-                { label: 'Shell 0 - 550km / 53.0°',  orbits: 72, sats: 22, inc: 53.0,  alt: 550 },
-                { label: 'Shell 1 - 1110km / 53.8°', orbits: 32, sats: 50, inc: 53.8,  alt: 1110 },
-                { label: 'Shell 2 - 1130km / 74.0°', orbits: 8,  sats: 50, inc: 74.0,  alt: 1130 },
-                { label: 'Shell 3 - 1275km / 81.0°', orbits: 5,  sats: 75, inc: 81.0,  alt: 1275 },
-                { label: 'Shell 4 - 1325km / 70.0°', orbits: 6,  sats: 75, inc: 70.0,  alt: 1325 },
-            ],
-            Kuiper: [
-                { label: 'Shell 0 - 630km / 51.9°',  orbits: 34, sats: 34, inc: 51.9,  alt: 630 },
-                { label: 'Shell 1 - 610km / 42.0°',  orbits: 36, sats: 36, inc: 42.0,  alt: 610 },
-                { label: 'Shell 2 - 590km / 33.0°',  orbits: 28, sats: 28, inc: 33.0,  alt: 590 },
-            ],
-            Telesat: [
-                { label: 'Shell 0 - 1015km / 98.98°', orbits: 27, sats: 13, inc: 98.98, alt: 1015 },
-                { label: 'Shell 1 - 1325km / 50.88°', orbits: 40, sats: 33, inc: 50.88, alt: 1325 },
-            ],
+        // Display metadata for badges
+        this.linkTypeMeta = {
+            isl: { label: 'ISL 星间链路', color: '#4FC3F7' },
+            gsl: { label: 'GSL 地面-卫星', color: '#FF8A65' },
+            sul: { label: 'SUL 卫星-无人机', color: '#81C784' },
+            ssl: { label: 'SSL 卫星-船舶', color: '#FFB74D' },
+        };
+        this.nodeTypeMeta = {
+            satellite:      { label: '卫星',   color: '#1E90FF' },
+            uav:            { label: '无人机', color: '#32CD32' },
+            ship:           { label: '船舶',   color: '#FFA500' },
+            ground_station: { label: '地面站', color: '#FF4500' },
         };
     }
 
-    /**
-     * Initialize UI event listeners
-     */
-    initializeUI() {
-        // Mode buttons
-        document.getElementById('modeRealtime').addEventListener('click', () => this.switchMode('realtime'));
-        document.getElementById('modeOffline').addEventListener('click', () => this.switchMode('offline'));
+    // ==================================================================
+    // Initialization
+    // ==================================================================
 
-        // Playback controls
+    initializeUI() {
+        // Playback
         document.getElementById('playPauseBtn').addEventListener('click', () => this.togglePlayPause());
         document.getElementById('stopBtn').addEventListener('click', () => this.stopPlayback());
-        document.getElementById('resetBtn').addEventListener('click', () => this.resetSimulation());
 
-        // Speed control
-        const speedSlider = document.getElementById('speedSlider');
-        speedSlider.addEventListener('input', (e) => this.setSpeed(parseFloat(e.target.value)));
+        // Speed
+        document.getElementById('speedSelect').addEventListener('change', (e) => {
+            this.setSpeed(parseFloat(e.target.value));
+        });
 
-        // Timeline control
+        // Timeline
         const timelineSlider = document.getElementById('timelineSlider');
         timelineSlider.addEventListener('input', (e) => this.onTimelineSeek(parseFloat(e.target.value)));
-        document.getElementById('timelineInput').addEventListener('change', (e) => this.jumpToTime(parseFloat(e.target.value)));
-
-        // Track user drag so state_update doesn't fight the slider
         timelineSlider.addEventListener('pointerdown', () => { this.isUserSeeking = true; });
         window.addEventListener('pointerup', () => {
             if (this.isUserSeeking) {
                 this.isUserSeeking = false;
-                // Commit the seek to the backend once the drag ends
                 this.jumpToTime(parseFloat(timelineSlider.value));
             }
         });
 
-        // Metrics selection
-        document.getElementById('metricsSelect').addEventListener('change', (e) => this.selectMetrics(e.target.value));
-
-        // Type visibility toggles — nodes
-        document.getElementById('toggleSatellite').addEventListener('change', (e) => {
-            this.cesium.setNodeTypeVisibility('satellite', e.target.checked);
-        });
-        document.getElementById('toggleUav').addEventListener('change', (e) => {
-            this.cesium.setNodeTypeVisibility('uav', e.target.checked);
-        });
-        document.getElementById('toggleShip').addEventListener('change', (e) => {
-            this.cesium.setNodeTypeVisibility('ship', e.target.checked);
-        });
-        document.getElementById('toggleGroundStation').addEventListener('change', (e) => {
-            this.cesium.setNodeTypeVisibility('ground_station', e.target.checked);
-        });
-
-        // Type visibility toggles — links
-        document.getElementById('toggleISL').addEventListener('change', (e) => {
-            this.cesium.setLinkTypeVisibility('isl', e.target.checked);
-        });
-        document.getElementById('toggleGSL').addEventListener('change', (e) => {
-            this.cesium.setLinkTypeVisibility('gsl', e.target.checked);
-        });
-        document.getElementById('toggleSUL').addEventListener('change', (e) => {
-            this.cesium.setLinkTypeVisibility('sul', e.target.checked);
-        });
-        document.getElementById('toggleSSL').addEventListener('change', (e) => {
-            this.cesium.setLinkTypeVisibility('ssl', e.target.checked);
-        });
-
-        // Scenario selection
-        document.getElementById('scenarioSelect').addEventListener('change', (e) => this.selectScenario(e.target.value));
-
-        // Constellation / shell selection
-        document.getElementById('constellationSelect').addEventListener('change', (e) => this.onConstellationChange(e.target.value));
-        document.getElementById('shellSelect').addEventListener('change', (e) => this.onShellChange(parseInt(e.target.value)));
-
-        // Satellite filter
-        document.getElementById('satelliteSearch').addEventListener('input', (e) => this.searchSatellites(e.target.value));
-        document.getElementById('selectAllSatellites').addEventListener('click', () => this.selectAllSatellites());
-        document.getElementById('deselectAllSatellites').addEventListener('click', () => this.deselectAllSatellites());
-
-        // Station filter
-        document.getElementById('stationSearch').addEventListener('input', (e) => this.searchStations(e.target.value));
-        document.getElementById('selectAllStations').addEventListener('click', () => this.selectAllStations());
-        document.getElementById('deselectAllStations').addEventListener('click', () => this.deselectAllStations());
-
-        // Offline mode controls
-        document.getElementById('saveCesiumToken').addEventListener('click', () => this.saveCesiumToken());
-        document.getElementById('loadOfflineData').addEventListener('click', () => this.loadOfflineData());
-        document.getElementById('loadCzmlFromLocal').addEventListener('click', () => this.loadCzmlFromLocal());
-
-        console.log('[UIController] UI initialized');
-    }
-
-    /**
-     * Switch between realtime and offline mode
-     */
-    switchMode(mode) {
-        this.currentMode = mode;
-        const realtimeBtn = document.getElementById('modeRealtime');
-        const offlineBtn = document.getElementById('modeOffline');
-        const realtimeControls = document.getElementById('realtimeControls');
-        const offlineControls = document.getElementById('offlineControls');
-
-        if (mode === 'realtime') {
-            realtimeBtn.classList.add('active');
-            offlineBtn.classList.remove('active');
-            realtimeControls.style.display = 'block';
-            offlineControls.style.display = 'none';
-            if (!this.ws.isConnected) {
-                this.ws.connect();
-            }
-        } else {
-            realtimeBtn.classList.remove('active');
-            offlineBtn.classList.add('active');
-            realtimeControls.style.display = 'none';
-            offlineControls.style.display = 'block';
+        // Node type visibility
+        const nodeToggles = {
+            toggleSatellite: 'satellite',
+            toggleUav: 'uav',
+            toggleShip: 'ship',
+            toggleGroundStation: 'ground_station',
+        };
+        for (const [elId, nodeType] of Object.entries(nodeToggles)) {
+            document.getElementById(elId).addEventListener('change', (e) => {
+                this.cesium.setNodeTypeVisibility(nodeType, e.target.checked);
+            });
         }
 
-        console.log(`[UIController] Switched to ${mode} mode`);
+        // Link type visibility
+        const linkToggles = {
+            toggleISL: 'isl', toggleGSL: 'gsl', toggleSUL: 'sul', toggleSSL: 'ssl',
+        };
+        for (const [elId, linkType] of Object.entries(linkToggles)) {
+            document.getElementById(elId).addEventListener('change', (e) => {
+                this.cesium.setLinkTypeVisibility(linkType, e.target.checked);
+            });
+        }
+
+        // Panel collapse / reopen
+        this._bindCollapse('layersPanel', 'layersCollapse', 'layersReopen');
+        this._bindCollapse('statsPanel', 'statsCollapse', 'statsReopen');
+
+        // Detail panel close
+        document.getElementById('detailClose').addEventListener('click', () => {
+            this.hideDetail();
+            this.cesium.clearSelection();
+        });
+
+        // Dismiss hint toast after a while
+        setTimeout(() => {
+            const toast = document.getElementById('hintToast');
+            if (toast) toast.classList.add('hide');
+        }, 8000);
+
+        console.log('[UIController] UI initialized (v3 minimal)');
     }
 
-    /**
-     * Toggle play/pause
-     */
+    _bindCollapse(panelId, btnId, reopenId) {
+        const panel = document.getElementById(panelId);
+        const reopen = document.getElementById(reopenId);
+        document.getElementById(btnId).addEventListener('click', () => {
+            panel.classList.add('collapsed');
+            panel.style.display = 'none';
+            reopen.style.display = 'block';
+        });
+        reopen.addEventListener('click', () => {
+            panel.classList.remove('collapsed');
+            panel.style.display = 'block';
+            reopen.style.display = 'none';
+        });
+    }
+
+    // ==================================================================
+    // Playback
+    // ==================================================================
+
     togglePlayPause() {
         const btn = document.getElementById('playPauseBtn');
         if (this.isPlaying) {
             this.ws.sendPauseCommand();
-            btn.textContent = '▶ Play';
-            btn.style.background = '#2196F3';
+            btn.textContent = '▶';
             this.isPlaying = false;
         } else {
             this.ws.sendPlayCommand();
-            btn.textContent = '⏸ Pause';
-            btn.style.background = '#ff9800';
+            btn.textContent = '⏸';
             this.isPlaying = true;
         }
     }
 
-    /**
-     * Stop playback
-     */
     stopPlayback() {
         this.ws.sendStopCommand();
         const btn = document.getElementById('playPauseBtn');
-        btn.textContent = '▶ Play';
-        btn.style.background = '#2196F3';
+        btn.textContent = '▶';
         this.isPlaying = false;
     }
 
-    /**
-     * Reset simulation
-     */
-    resetSimulation() {
-        this.ws.sendResetCommand();
-        document.getElementById('timelineSlider').value = '0';
-        document.getElementById('timelineInput').value = '0';
-        document.getElementById('simTime').textContent = '0s';
-        this.isPlaying = false;
-        const btn = document.getElementById('playPauseBtn');
-        btn.textContent = '▶ Play';
-        btn.style.background = '#2196F3';
-    }
-
-    /**
-     * Set animation speed
-     */
     setSpeed(speed) {
-        document.getElementById('speedDisplay').textContent = speed.toFixed(1) + 'x';
         this.ws.sendSpeedCommand(speed);
         this.cesium.setAnimationSpeed(speed);
     }
 
-    /**
-     * Set timeline range (called when simulation_init is received)
-     */
     setTimelineRange(min, max) {
         const slider = document.getElementById('timelineSlider');
         slider.min = min;
         slider.max = max;
         slider.value = min;
-        document.getElementById('timelineInput').min = min;
-        document.getElementById('timelineInput').max = max;
-        document.getElementById('timelineInput').value = min;
     }
 
     /**
-     * Update time display (called on each state update).
-     * Only touches the DOM when the whole second changes to avoid jitter.
+     * Update time display. Only touches DOM when whole second changes.
      */
     updateTimeDisplay(timestamp) {
         const t = Math.floor(timestamp);
         if (t === this._lastTimeInt) return;
         this._lastTimeInt = t;
         document.getElementById('simTime').textContent = t + 's';
-        document.getElementById('timelineSlider').value = t;
-        document.getElementById('timelineInput').value = t;
+        if (!this.isUserSeeking) {
+            document.getElementById('timelineSlider').value = t;
+        }
     }
 
-    /**
-     * Handle timeline slider drag
-     */
     onTimelineSeek(value) {
-        document.getElementById('timelineInput').value = value;
         document.getElementById('simTime').textContent = Math.floor(value) + 's';
     }
 
-    /**
-     * Jump to specific time
-     */
     jumpToTime(timestamp) {
         if (isNaN(timestamp)) return;
         this.ws.sendTimelineCommand(timestamp);
@@ -260,445 +178,144 @@ class UIController {
         document.getElementById('simTime').textContent = Math.floor(timestamp) + 's';
     }
 
+    // ==================================================================
+    // Detail panel (link / node)
+    // ==================================================================
+
     /**
-     * Select metrics to display
+     * Show link detail panel.
+     * data: {linkId, linkType, source, target, bandwidth_utilization,
+     *        latency_ms, loss_rate, is_active}
      */
-    selectMetrics(metricsType) {
-        this.selectedMetrics = metricsType;
-        this.ws.sendMetricsCommand(metricsType);
-        this.cesium.setMetricsMode(metricsType);
-        this.updateMetricsLegend(metricsType);
+    showLinkDetail(data) {
+        this._detailKind = 'link';
+        this._detailId = data.linkId;
+
+        const meta = this.linkTypeMeta[data.linkType] || { label: data.linkType, color: '#888' };
+        document.getElementById('detailTitle').textContent = '链路详情';
+
+        const body = document.getElementById('detailBody');
+        body.innerHTML =
+            `<span class="detail-type-badge" style="background:${meta.color}22;color:${meta.color};border:1px solid ${meta.color}55">${meta.label}</span>` +
+            `<div class="detail-endpoints">` +
+                `<span id="dSource">${data.source}</span>` +
+                `<span class="arrow">⟷</span>` +
+                `<span id="dTarget">${data.target}</span>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>带宽利用率</span><span class="mv" id="dUtil">--</span></div>` +
+                `<div class="progress-track"><div class="progress-fill" id="dUtilBar"></div></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>时延</span><span class="mv" id="dLatency">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>丢包率</span><span class="mv" id="dLoss">--</span></div>` +
+            `</div>` +
+            `<div class="detail-status"><span class="dot" id="dStatusDot"></span><span id="dStatus">--</span></div>`;
+
+        document.getElementById('detailPanel').style.display = 'block';
+        this.updateLinkDetail(data);
     }
 
     /**
-     * Show/hide and update the color legend bar based on selected metric.
+     * Live-update the open link detail panel with fresh metrics.
      */
-    updateMetricsLegend(metricsType) {
-        const legend = document.getElementById('metricsLegend');
-        const title = document.getElementById('legendTitle');
-        const ticks = document.getElementById('legendTicks');
-        const bar = document.getElementById('legendBar');
+    updateLinkDetail(data) {
+        if (this._detailKind !== 'link' || this._detailId !== data.linkId) return;
 
-        const legends = {
-            bandwidth: {
-                title: 'Bandwidth Utilization',
-                gradient: 'linear-gradient(to right, #006400 0%, #00FF00 30%, #ADFF2F 50%, #FFFF00 70%, #FF8C00 85%, #8B0000 100%)',
-                stops: [
-                    { pos: '0%',  label: '0%' },
-                    { pos: '30%', label: '30%' },
-                    { pos: '50%', label: '50%' },
-                    { pos: '70%', label: '70%' },
-                    { pos: '85%', label: '85%' },
-                    { pos: '100%',label: '100%' },
-                ],
-            },
-            latency: {
-                title: 'Latency (ms)',
-                gradient: 'linear-gradient(to right, #87F5FF 0%, #36E8A8 20%, #F9F871 40%, #FFB347 70%, #FF6B35 100%)',
-                stops: [
-                    { pos: '0%',  label: '0' },
-                    { pos: '20%', label: '20' },
-                    { pos: '40%', label: '40' },
-                    { pos: '70%', label: '70' },
-                    { pos: '100%',label: '100+' },
-                ],
-            },
-            loss_rate: {
-                title: 'Packet Loss Rate',
-                gradient: 'linear-gradient(to right, #20A4F3 0%, #5ED9FF 10%, #64DD78 30%, #FFC857 55%, #FF5722 80%, #9E0000 100%)',
-                stops: [
-                    { pos: '0%',  label: '0%' },
-                    { pos: '10%', label: '0.5%' },
-                    { pos: '30%', label: '2%' },
-                    { pos: '55%', label: '6%' },
-                    { pos: '80%', label: '15%' },
-                    { pos: '100%',label: '>15%' },
-                ],
-            },
-            link_status: {
-                title: 'Link Status',
-                gradient: 'linear-gradient(to right, #4caf50, #f44336)',
-                stops: [
-                    { pos: '0%',  label: 'Active' },
-                    { pos: '100%',label: 'Inactive' },
-                ],
-            },
-        };
+        const util = Number(data.bandwidth_utilization) || 0;
+        const utilPct = Math.round(util * 100);
+        const utilEl = document.getElementById('dUtil');
+        if (utilEl) utilEl.textContent = utilPct + '%';
+        const bar = document.getElementById('dUtilBar');
+        if (bar) bar.style.width = utilPct + '%';
 
-        const cfg = legends[metricsType];
-        if (cfg) {
-            title.textContent = cfg.title;
-            bar.style.background = cfg.gradient;
+        const lat = document.getElementById('dLatency');
+        if (lat) lat.textContent = (Number(data.latency_ms) || 0).toFixed(1) + ' ms';
 
-            ticks.innerHTML = '';
-            cfg.stops.forEach(function(s) {
-                var el = document.createElement('span');
-                el.className = 'legend-tick';
-                el.style.left = s.pos;
-                el.textContent = s.label;
-                ticks.appendChild(el);
-            });
+        const loss = document.getElementById('dLoss');
+        if (loss) loss.textContent = ((Number(data.loss_rate) || 0) * 100).toFixed(3) + ' %';
 
-            legend.style.display = 'block';
-        } else {
-            legend.style.display = 'none';
+        const active = data.is_active !== false;
+        const dot = document.getElementById('dStatusDot');
+        const st = document.getElementById('dStatus');
+        if (dot) dot.classList.toggle('on', active);
+        if (st) {
+            st.textContent = active ? '链路活跃' : '链路中断';
+            st.style.color = active ? 'var(--good)' : 'var(--bad)';
         }
     }
 
     /**
-     * Select simulation scenario
+     * Show node detail panel.
+     * data: {nodeId, nodeType, label, lat, lon, alt, ...}
      */
-    selectScenario(scenario) {
-        this.ws.sendScenarioCommand(scenario);
-        const info = this.scenarioInfo[scenario] || '';
-        document.getElementById('scenarioInfo').textContent = info;
-        console.log('[UIController] Scenario:', scenario);
+    showNodeDetail(data) {
+        this._detailKind = 'node';
+        this._detailId = data.nodeId;
+
+        const meta = this.nodeTypeMeta[data.nodeType] || { label: data.nodeType, color: '#888' };
+        document.getElementById('detailTitle').textContent = '节点详情';
+
+        const body = document.getElementById('detailBody');
+        body.innerHTML =
+            `<span class="detail-type-badge" style="background:${meta.color}22;color:${meta.color};border:1px solid ${meta.color}55">${meta.label}</span>` +
+            `<div class="detail-endpoints"><span>${data.label || data.nodeId}</span></div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>经度</span><span class="mv" id="dLon">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>纬度</span><span class="mv" id="dLat">--</span></div>` +
+            `</div>` +
+            `<div class="metric-block">` +
+                `<div class="metric-label"><span>高度</span><span class="mv" id="dAlt">--</span></div>` +
+            `</div>`;
+
+        document.getElementById('detailPanel').style.display = 'block';
+        this.updateNodeDetail(data);
     }
 
-    /**
-     * Constellation dropdown changed — update shell dropdown options.
-     */
-    onConstellationChange(constellationName) {
-        this.updateShellDropdown(constellationName);
-        // Auto-switch to shell 0 of the new constellation
-        this.switchConstellation(constellationName, 0);
+    updateNodeDetail(data) {
+        if (this._detailKind !== 'node' || this._detailId !== data.nodeId) return;
+        const lon = document.getElementById('dLon');
+        const lat = document.getElementById('dLat');
+        const alt = document.getElementById('dAlt');
+        if (lon && data.lon != null) lon.textContent = Number(data.lon).toFixed(2) + '°';
+        if (lat && data.lat != null) lat.textContent = Number(data.lat).toFixed(2) + '°';
+        if (alt && data.alt != null) alt.textContent = Math.round(Number(data.alt)).toLocaleString() + ' km';
     }
 
-    /**
-     * Shell dropdown changed — trigger constellation switch.
-     */
-    onShellChange(shellIndex) {
-        var name = document.getElementById('constellationSelect').value;
-        this.switchConstellation(name, shellIndex);
+    hideDetail() {
+        this._detailKind = null;
+        this._detailId = null;
+        document.getElementById('detailPanel').style.display = 'none';
     }
 
-    /**
-     * Update shell dropdown options for the given constellation.
-     */
-    updateShellDropdown(constellationName) {
-        var shellSelect = document.getElementById('shellSelect');
-        var shells = this._shellMeta[constellationName] || [];
-        shellSelect.innerHTML = '';
-        shells.forEach(function (s, i) {
-            var opt = document.createElement('option');
-            opt.value = i;
-            opt.textContent = s.label;
-            shellSelect.appendChild(opt);
-        });
-        shellSelect.value = '0';
+    /** Is the detail panel currently showing this link? */
+    isLinkDetailOpen(linkId) {
+        return this._detailKind === 'link' && this._detailId === linkId;
     }
 
-    /**
-     * Switch to a different constellation shell.
-     */
-    switchConstellation(constellationName, shellIndex) {
-        console.log('[UIController] Switching to', constellationName, 'shell', shellIndex);
-        // Block state updates from the old constellation until the new
-        // simulation_init arrives and triggers the real clear+rebuild.
-        this.app._constellationSwitching = true;
-        // Clear filter selections — new satellites will have different IDs
-        this.clearFilterSelections();
-        // Send command to backend
-        this.ws.sendConstellationCommand(constellationName, shellIndex);
-        // Safety timeout: reset the guard if the backend never responds,
-        // otherwise stale state_updates would be blocked forever.
-        clearTimeout(this._switchTimeout);
-        var self = this;
-        this._switchTimeout = setTimeout(function () {
-            if (self.app._constellationSwitching) {
-                console.warn('[UIController] Constellation switch timed out — resetting guard');
-                self.app._constellationSwitching = false;
-            }
-        }, 5000);
+    isNodeDetailOpen(nodeId) {
+        return this._detailKind === 'node' && this._detailId === nodeId;
     }
 
-    /**
-     * Update constellation info display (called from app on simulation_init).
-     */
-    updateConstellationInfo(name, currentShell, shellCount, totalSats, totalLinks) {
-        var shells = this._shellMeta[name] || [];
-        var shellLabel = shells[currentShell] ? shells[currentShell].label : ('Shell ' + currentShell);
-        var el = document.getElementById('constellationInfo');
-        if (el) {
-            el.textContent = name + ' | ' + shellLabel + ' | ' + totalSats + ' sats, ' + totalLinks + ' links';
-        }
-    }
+    get detailKind() { return this._detailKind; }
+    get detailId() { return this._detailId; }
 
-    /**
-     * Clear all filter selections (used on constellation switch).
-     */
-    clearFilterSelections() {
-        this.selectedSatellites.clear();
-        this.selectedStations.clear();
-    }
+    // ==================================================================
+    // Status / statistics
+    // ==================================================================
 
-    /**
-     * Search and filter satellite list
-     */
-    searchSatellites(query) {
-        const filterList = document.getElementById('satelliteFilterList');
-        const items = filterList.querySelectorAll('.filter-item');
-
-        items.forEach((item) => {
-            const text = item.textContent.toLowerCase();
-            item.style.display = text.includes(query.toLowerCase()) ? 'flex' : 'none';
-        });
-    }
-
-    /**
-     * Search and filter station list
-     */
-    searchStations(query) {
-        const filterList = document.getElementById('stationFilterList');
-        const items = filterList.querySelectorAll('.filter-item');
-
-        items.forEach((item) => {
-            const text = item.textContent.toLowerCase();
-            item.style.display = text.includes(query.toLowerCase()) ? 'flex' : 'none';
-        });
-    }
-
-    /**
-     * Select all satellites
-     */
-    selectAllSatellites() {
-        const filterList = document.getElementById('satelliteFilterList');
-        const checkboxes = filterList.querySelectorAll('input[type="checkbox"]');
-
-        checkboxes.forEach((checkbox) => {
-            if (checkbox.parentElement.style.display !== 'none') {
-                checkbox.checked = true;
-                this.selectedSatellites.add(checkbox.value);
-            }
-        });
-
-        this.applyFilters();
-    }
-
-    /**
-     * Deselect all satellites
-     */
-    deselectAllSatellites() {
-        const filterList = document.getElementById('satelliteFilterList');
-        const checkboxes = filterList.querySelectorAll('input[type="checkbox"]');
-
-        checkboxes.forEach((checkbox) => {
-            checkbox.checked = false;
-            this.selectedSatellites.delete(checkbox.value);
-        });
-
-        this.applyFilters();
-    }
-
-    /**
-     * Select all stations
-     */
-    selectAllStations() {
-        const filterList = document.getElementById('stationFilterList');
-        const checkboxes = filterList.querySelectorAll('input[type="checkbox"]');
-
-        checkboxes.forEach((checkbox) => {
-            if (checkbox.parentElement.style.display !== 'none') {
-                checkbox.checked = true;
-                this.selectedStations.add(checkbox.value);
-            }
-        });
-
-        this.applyFilters();
-    }
-
-    /**
-     * Deselect all stations
-     */
-    deselectAllStations() {
-        const filterList = document.getElementById('stationFilterList');
-        const checkboxes = filterList.querySelectorAll('input[type="checkbox"]');
-
-        checkboxes.forEach((checkbox) => {
-            checkbox.checked = false;
-            this.selectedStations.delete(checkbox.value);
-        });
-
-        this.applyFilters();
-    }
-
-    /**
-     * Apply selected filters
-     */
-    applyFilters() {
-        this.cesium.setSatelliteFilter(Array.from(this.selectedSatellites));
-
-        // Split station-filter selections by node type
-        const gs = [], uavs = [], ships = [];
-        for (const id of this.selectedStations) {
-            if (id.startsWith('UAV-')) uavs.push(id);
-            else if (id.startsWith('Ship-')) ships.push(id);
-            else gs.push(id);
-        }
-        this.cesium.setNodeFilter('ground_station', gs);
-        this.cesium.setNodeFilter('uav', uavs);
-        this.cesium.setNodeFilter('ship', ships);
-
-        this.ws.sendFilterCommand(
-            Array.from(this.selectedSatellites),
-            Array.from(this.selectedStations)
-        );
-    }
-
-    /**
-     * Populate satellite filter list
-     */
-    populateSatelliteFilter(satellites) {
-        const filterList = document.getElementById('satelliteFilterList');
-
-        // Preserve existing selections
-        const currentSelection = new Set(this.selectedSatellites);
-
-        filterList.innerHTML = '';
-
-        satellites.forEach((satId) => {
-            const checked = currentSelection.size === 0 ? true : currentSelection.has(satId);
-            const item = document.createElement('div');
-            item.className = 'filter-item';
-            item.innerHTML =
-                '<input type="checkbox" value="' +
-                satId +
-                '" id="sat-' +
-                satId +
-                '"' +
-                (checked ? ' checked' : '') +
-                '>' +
-                '<label for="sat-' +
-                satId +
-                '">' +
-                satId +
-                '</label>';
-
-            const checkbox = item.querySelector('input');
-            checkbox.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    this.selectedSatellites.add(satId);
-                } else {
-                    this.selectedSatellites.delete(satId);
-                }
-                this.applyFilters();
-            });
-
-            if (checked) {
-                this.selectedSatellites.add(satId);
-            }
-
-            filterList.appendChild(item);
-        });
-    }
-
-    /**
-     * Populate station filter list
-     */
-    populateStationFilter(stations) {
-        const filterList = document.getElementById('stationFilterList');
-
-        const currentSelection = new Set(this.selectedStations);
-
-        filterList.innerHTML = '';
-
-        stations.forEach((stationId) => {
-            const checked = currentSelection.size === 0 ? true : currentSelection.has(stationId);
-            const item = document.createElement('div');
-            item.className = 'filter-item';
-            item.innerHTML =
-                '<input type="checkbox" value="' +
-                stationId +
-                '" id="sta-' +
-                stationId +
-                '"' +
-                (checked ? ' checked' : '') +
-                '>' +
-                '<label for="sta-' +
-                stationId +
-                '">' +
-                stationId +
-                '</label>';
-
-            const checkbox = item.querySelector('input');
-            checkbox.addEventListener('change', (e) => {
-                if (e.target.checked) {
-                    this.selectedStations.add(stationId);
-                } else {
-                    this.selectedStations.delete(stationId);
-                }
-                this.applyFilters();
-            });
-
-            if (checked) {
-                this.selectedStations.add(stationId);
-            }
-
-            filterList.appendChild(item);
-        });
-    }
-
-    /**
-     * Populate node filter lists from v2 simulation_init nodes.
-     * @param {object} nodesByType - {satellite: [...], uav: [...], ship: [...], ground_station: [...]}
-     */
-    populateNodeFilters(nodesByType) {
-        // Satellites → satellite filter list
-        if (nodesByType.satellite) {
-            this.populateSatelliteFilter(nodesByType.satellite);
-        }
-
-        // Ground stations + UAVs + Ships → station filter list
-        const others = [
-            ...(nodesByType.ground_station || []),
-            ...(nodesByType.uav || []),
-            ...(nodesByType.ship || []),
-        ];
-        if (others.length > 0) {
-            this.populateStationFilter(others);
-        }
-    }
-
-    /**
-     * Update metrics summary display (v2 state_update.metrics_summary).
-     * Throttled to ~2Hz — the numbers change slowly, no need to repaint at 10Hz.
-     */
-    updateMetricsSummary(summary) {
-        const now = Date.now();
-        if (now - this._lastMetricsUpdate < 500) return;
-        this._lastMetricsUpdate = now;
-
-        const el = document.getElementById('metricsSummary');
-        if (el) {
-            el.textContent =
-                `Active links: ${summary.active_links} | ` +
-                `Nodes: ${summary.total_nodes} | ` +
-                `Avg util: ${(summary.avg_utilization * 100).toFixed(1)}% | ` +
-                `Max latency: ${summary.max_latency_ms}ms`;
-        }
-    }
-
-    /**
-     * Update connection status indicator
-     */
     updateConnectionStatus(isConnected) {
-        const indicator = document.getElementById('connectionIndicator');
-        const statusText = document.getElementById('connectionStatus');
-
-        if (isConnected) {
-            indicator.className = 'status-indicator status-connected';
-            statusText.textContent = 'Connected';
-            statusText.style.color = '#4caf50';
-        } else {
-            indicator.className = 'status-indicator status-disconnected';
-            statusText.textContent = 'Disconnected';
-            statusText.style.color = '#f44336';
-        }
+        const dot = document.getElementById('connectionIndicator');
+        const text = document.getElementById('connectionStatus');
+        dot.classList.toggle('on', isConnected);
+        text.textContent = isConnected ? '已连接' : '未连接';
+        text.style.color = isConnected ? 'var(--good)' : 'var(--bad)';
     }
 
-    /**
-     * Update statistics display
-     */
     updateStatistics(stats) {
         document.getElementById('satCount').textContent = stats.satellites || 0;
         document.getElementById('uavCount').textContent = stats.uavs || 0;
@@ -709,97 +326,40 @@ class UIController {
     }
 
     /**
-     * Save Cesium token to localStorage
+     * Update metrics summary (throttled to ~2Hz).
      */
-    saveCesiumToken() {
-        const token = document.getElementById('cesiumToken').value.trim();
-        if (token) {
-            localStorage.setItem('cesiumToken', token);
-            Cesium.Ion.defaultAccessToken = token;
-            document.getElementById('tokenStatus').textContent = 'Token saved';
-            document.getElementById('tokenStatus').style.color = '#4caf50';
-        } else {
-            document.getElementById('tokenStatus').textContent = 'Please enter a token';
-            document.getElementById('tokenStatus').style.color = '#f44336';
+    updateMetricsSummary(summary) {
+        const now = Date.now();
+        if (now - this._lastMetricsUpdate < 500) return;
+        this._lastMetricsUpdate = now;
+
+        const el = document.getElementById('metricsSummary');
+        if (el) {
+            el.innerHTML =
+                `活跃链路 <b style="color:var(--text)">${summary.active_links}</b> · ` +
+                `节点 <b style="color:var(--text)">${summary.total_nodes}</b><br>` +
+                `平均利用率 <b style="color:var(--text)">${(summary.avg_utilization * 100).toFixed(1)}%</b> · ` +
+                `最大时延 <b style="color:var(--text)">${summary.max_latency_ms}ms</b>`;
         }
     }
 
-    /**
-     * Load saved Cesium token
-     */
+    // ==================================================================
+    // Compat stubs (kept so app.js calls don't break)
+    // ==================================================================
+
+    /** v2 simulation_init nodes — filter lists removed in v3 UI, no-op. */
+    populateNodeFilters(nodesByType) {
+        // Intentionally empty: per-node filter lists were removed for a
+        // cleaner UI. Type-level visibility is handled by the layers panel.
+    }
+
+    /** Cesium token is loaded silently from localStorage (no UI in v3). */
     loadCesiumToken() {
         const token = localStorage.getItem('cesiumToken');
-        if (token) {
-            document.getElementById('cesiumToken').value = token;
+        if (token && typeof Cesium !== 'undefined') {
             Cesium.Ion.defaultAccessToken = token;
-            document.getElementById('tokenStatus').textContent = 'Loaded';
-            document.getElementById('tokenStatus').style.color = '#4caf50';
-            return token;
         }
-        return null;
-    }
-
-    /**
-     * Load offline data from URL (CZML file)
-     */
-    async loadOfflineData() {
-        const filePath = document.getElementById('czmlFilePath').value.trim();
-        const statusEl = document.getElementById('offlineStatus');
-
-        if (!filePath) {
-            statusEl.textContent = 'Error: No file path specified';
-            return;
-        }
-
-        try {
-            statusEl.textContent = 'Loading...';
-
-            const dataSource = await Cesium.CzmlDataSource.load(filePath);
-            this.cesium.viewer.dataSources.add(dataSource);
-            this.cesium.viewer.flyTo(dataSource);
-
-            statusEl.textContent = 'CZML loaded successfully';
-            statusEl.style.color = '#4caf50';
-
-        } catch (error) {
-            console.error('[UIController] Error loading offline data:', error);
-            statusEl.textContent = 'Error: ' + error.message;
-            statusEl.style.color = '#f44336';
-        }
-    }
-
-    /**
-     * Load CZML from local file picker
-     */
-    loadCzmlFromLocal() {
-        const input = document.createElement('input');
-        input.type = 'file';
-        input.accept = '.czml,.json';
-        input.onchange = async (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-
-            const statusEl = document.getElementById('offlineStatus');
-            statusEl.textContent = 'Loading...';
-
-            try {
-                const text = await file.text();
-                const czmlData = JSON.parse(text);
-
-                const dataSource = await Cesium.CzmlDataSource.load(czmlData);
-                this.cesium.viewer.dataSources.add(dataSource);
-                this.cesium.viewer.flyTo(dataSource);
-
-                statusEl.textContent = 'Loaded: ' + file.name;
-                statusEl.style.color = '#4caf50';
-
-            } catch (error) {
-                console.error('[UIController] Error loading local file:', error);
-                statusEl.textContent = 'Error: ' + error.message;
-                statusEl.style.color = '#f44336';
-            }
-        };
-        input.click();
+        return token;
     }
 }
 

@@ -65,6 +65,10 @@ class CesiumManager {
         this.metricsMode = 'none';
         this.animationSpeed = 1.0;
 
+        // Selection callback — app.js sets this to receive link/node picks.
+        // Called with a plain data object, or null when selection is cleared.
+        this.onSelect = null;
+
         // Visibility toggles per node type
         this.typeVisibility = {
             satellite: true,
@@ -201,7 +205,10 @@ class CesiumManager {
 
         this.selectedEntity = entity;
 
-        if (!entity || !entity.properties) return;
+        if (!entity || !entity.properties) {
+            this._emitSelect(null);
+            return;
+        }
 
         const type = entity.properties.type
             ? entity.properties.type.getValue()
@@ -213,6 +220,7 @@ class CesiumManager {
                 color: Cesium.Color.CYAN,
             });
             entity.polyline.width = new Cesium.ConstantProperty(3);
+            this._emitSelect(this._buildLinkInfo(entity));
         } else if (type && this.nodeTypes[type]) {
             entity.point.color = new Cesium.ConstantProperty(Cesium.Color.CYAN);
             entity.point.pixelSize = new Cesium.ConstantProperty(
@@ -221,7 +229,95 @@ class CesiumManager {
             if (entity.label) {
                 entity.label.show = new Cesium.ConstantProperty(true);
             }
+            this._emitSelect(this._buildNodeInfo(entity, type));
+        } else {
+            this._emitSelect(null);
         }
+    }
+
+    /**
+     * Programmatically clear the current selection (e.g. when the detail
+     * panel is closed) and restore the entity's original style.
+     */
+    clearSelection() {
+        if (this.selectedEntity && this.selectedEntity.id) {
+            this._restoreEntityStyle(this.selectedEntity);
+        }
+        this.selectedEntity = null;
+        this._emitSelect(null);
+    }
+
+    _emitSelect(info) {
+        if (typeof this.onSelect === 'function') {
+            this.onSelect(info);
+        }
+    }
+
+    /** Build a plain data object describing a link entity. */
+    _buildLinkInfo(entity) {
+        const p = entity.properties;
+        const get = (name) => (p[name] ? p[name].getValue() : undefined);
+        return {
+            kind: 'link',
+            linkId: get('linkId'),
+            linkType: get('linkType') || 'isl',
+            source: get('source'),
+            target: get('target'),
+            bandwidth_utilization: get('bandwidth_utilization') || 0,
+            latency_ms: get('latency_ms') || 0,
+            loss_rate: get('loss_rate') || 0,
+            is_active: get('is_active') !== false,
+        };
+    }
+
+    /** Build a plain data object describing a node entity. */
+    _buildNodeInfo(entity, nodeType) {
+        const p = entity.properties;
+        const get = (name) => (p[name] ? p[name].getValue() : undefined);
+
+        // Current geographic position
+        let lat = null, lon = null, alt = null;
+        if (entity.position) {
+            const carto = Cesium.Cartographic.fromCartesian(
+                entity.position.getValue(this.viewer.clock.currentTime)
+            );
+            if (carto) {
+                lon = Cesium.Math.toDegrees(carto.longitude);
+                lat = Cesium.Math.toDegrees(carto.latitude);
+                alt = carto.height / 1000.0; // m -> km
+            }
+        }
+
+        return {
+            kind: 'node',
+            nodeId: get('nodeId'),
+            nodeType: nodeType,
+            label: get('label') || get('nodeId'),
+            lat, lon, alt,
+        };
+    }
+
+    /**
+     * Read the latest metrics for a link by id (for live detail updates).
+     * Returns null if the link no longer exists.
+     */
+    getLinkData(linkId) {
+        const entity = this.entities.links.get(linkId);
+        if (!entity) return null;
+        return this._buildLinkInfo(entity);
+    }
+
+    /**
+     * Read the latest position/metadata for a node by id.
+     * Returns null if the node no longer exists.
+     */
+    getNodeData(nodeId) {
+        const entity = this.entities.nodes.get(nodeId);
+        if (!entity || !entity.properties) return null;
+        const type = entity.properties.type
+            ? entity.properties.type.getValue()
+            : null;
+        return this._buildNodeInfo(entity, type);
     }
 
     _restoreEntityStyle(entity) {
@@ -775,6 +871,7 @@ class CesiumManager {
         this.entities.links.clear();
         this._highlightedLinks.clear();
         this._linkColorCache.clear();
+        this.selectedEntity = null;
         this.stats = {
             satellites: 0,
             uavs: 0,
