@@ -103,6 +103,13 @@ class CesiumManager {
         // Performance: cache last color per link to avoid redundant material updates
         this._linkColorCache = new Map(); // linkId -> last color string
         this._batchDepth = 0;
+
+        // Phase 4 render smoothing: wall-time interpolation between 5Hz position
+        // samples so entities glide at the display refresh rate (≈60fps) instead
+        // of snapping on every state_update. nodeId -> segment state
+        // {prev, target, t0, dur, lastArrival, result}.
+        this.nodeInterp = new Map();
+        this.interpInterval = 200;   // expected backend push period (ms, 5Hz)
     }
 
     // ======================================================================
@@ -397,10 +404,24 @@ class CesiumManager {
             const label = properties.label || nodeId;
 
             if (!this.entities.nodes.has(nodeId)) {
+                // Seed interpolation state so the position callback has data
+                // before the first render frame.
+                const now = (typeof performance !== 'undefined')
+                    ? performance.now() : Date.now();
+                this.nodeInterp.set(nodeId, {
+                    prev: cartesian.clone(),
+                    target: cartesian.clone(),
+                    t0: now,
+                    dur: this.interpInterval,
+                    lastArrival: now,
+                    result: new Cesium.Cartesian3(),
+                });
+
                 // Create new entity
                 const entity = this.viewer.entities.add({
                     id: `${nodeType}-${nodeId}`,
-                    position: cartesian,
+                    position: new Cesium.CallbackProperty(
+                        () => this._sampleNode(nodeId), false),
                     point: {
                         pixelSize: style.pixelSize,
                         color: style.color,
@@ -440,9 +461,32 @@ class CesiumManager {
                     this.stats[statKey]++;
                 }
             } else {
-                // Update existing entity position
+                // Update existing entity: advance the interpolation segment
+                // (entity.position is a CallbackProperty bound to nodeInterp).
                 const entity = this.entities.nodes.get(nodeId);
-                entity.position = cartesian;
+                const now = (typeof performance !== 'undefined')
+                    ? performance.now() : Date.now();
+                let st = this.nodeInterp.get(nodeId);
+                if (!st) {
+                    st = {
+                        prev: cartesian.clone(),
+                        target: cartesian.clone(),
+                        t0: now,
+                        dur: this.interpInterval,
+                        lastArrival: now,
+                        result: new Cesium.Cartesian3(),
+                    };
+                    this.nodeInterp.set(nodeId, st);
+                } else {
+                    // Start the new segment from wherever the node currently is
+                    // so there is no visible jump, then glide to the new sample.
+                    const cur = this._sampleNode(nodeId, now);
+                    if (cur) Cesium.Cartesian3.clone(cur, st.prev);
+                    Cesium.Cartesian3.clone(cartesian, st.target);
+                    st.dur = Math.min(Math.max(now - st.lastArrival, 40), 1000);
+                    st.lastArrival = now;
+                    st.t0 = now;
+                }
 
                 // Update dynamic properties (heading, etc.)
                 for (const [key, value] of Object.entries(properties)) {
@@ -477,6 +521,29 @@ class CesiumManager {
 
     addOrUpdateShip(shipId, position, properties = {}) {
         return this.addOrUpdateNode(shipId, 'ship', position, properties);
+    }
+
+    /**
+     * Phase 4 render smoothing: sample a node's interpolated position.
+     * Invoked every render frame by the entity's position CallbackProperty
+     * (and by link endpoints). Linearly interpolates between the previous and
+     * latest 5Hz samples over the measured arrival interval, clamping once the
+     * next sample is overdue so nodes settle instead of extrapolating.
+     * @param {string} nodeId
+     * @param {number} [now] - wall-time ms (defaults to performance.now())
+     * @returns {Cesium.Cartesian3|undefined}
+     */
+    _sampleNode(nodeId, now) {
+        const st = this.nodeInterp.get(nodeId);
+        if (!st) return undefined;
+        if (now === undefined) {
+            now = (typeof performance !== 'undefined')
+                ? performance.now() : Date.now();
+        }
+        let a = (now - st.t0) / st.dur;
+        if (a <= 0) return st.prev;
+        if (a >= 1) return st.target;
+        return Cesium.Cartesian3.lerp(st.prev, st.target, a, st.result);
     }
 
     // ======================================================================
@@ -887,6 +954,7 @@ class CesiumManager {
         this.viewer.entities.removeAll();
         this.entities.nodes.clear();
         this.entities.links.clear();
+        this.nodeInterp.clear();
         this._highlightedLinks.clear();
         this._linkColorCache.clear();
         this.selectedEntity = null;
