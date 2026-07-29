@@ -197,6 +197,38 @@
             color: var(--text-dim);
         }
 
+        /* ---------- Coloring-mode select ---------- */
+        .mode-select {
+            width: 100%;
+            background: rgba(255,255,255,0.08);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 6px 8px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        .mode-select option { background: #161b27; }
+
+        /* ---------- Time-series chart panel ---------- */
+        #chartPanel { left: 14px; bottom: 22px; width: 250px; }
+        #chartReopen { left: 14px; bottom: 22px; top: auto; }
+        .chart-block { margin-bottom: 9px; }
+        .chart-block:last-child { margin-bottom: 0; }
+        .chart-title {
+            font-size: 10.5px;
+            letter-spacing: 0.5px;
+            margin-bottom: 3px;
+            font-weight: 600;
+        }
+        .ts-chart {
+            width: 100%;
+            height: 56px;
+            display: block;
+            background: rgba(0,0,0,0.28);
+            border-radius: 6px;
+        }
+
         /* ---------- Detail panel ---------- */
         .detail-type-badge {
             display: inline-block;
@@ -359,6 +391,14 @@
             <label class="layer-item"><input type="checkbox" id="toggleGSL" checked><span class="swatch line" style="background:#FF8A65"></span><span class="lbl">GSL 地面</span></label>
             <label class="layer-item"><input type="checkbox" id="toggleSUL" checked><span class="swatch line" style="background:#81C784"></span><span class="lbl">SUL 无人机</span></label>
             <label class="layer-item"><input type="checkbox" id="toggleSSL" checked><span class="swatch line" style="background:#FFB74D"></span><span class="lbl">SSL 船舶</span></label>
+            <div class="layer-group-label">链路着色</div>
+            <select id="metricsModeSelect" class="mode-select" title="按指标为链路着色">
+                <option value="none" selected>按类型（默认）</option>
+                <option value="bandwidth">按吞吐利用率</option>
+                <option value="queue">按队列深度</option>
+                <option value="latency">按时延</option>
+                <option value="loss_rate">按丢包率</option>
+            </select>
         </div>
     </div>
     <div id="layersReopen" class="reopen-tab" title="展开图层">☰</div>
@@ -390,6 +430,20 @@
         <div class="panel-body" id="detailBody"></div>
     </div>
 
+    <!-- Time-series charts panel (bottom-left) -->
+    <div id="chartPanel" class="glass side-panel">
+        <div class="panel-header">
+            <span>时序指标</span>
+            <button class="collapse-btn" id="chartCollapse" title="收起">‹</button>
+        </div>
+        <div class="panel-body">
+            <div class="chart-block"><div class="chart-title" style="color:#38bdf8">吞吐 (Mbps)</div><canvas id="chartThroughput" class="ts-chart"></canvas></div>
+            <div class="chart-block"><div class="chart-title" style="color:#fbbf24">端到端时延 (ms)</div><canvas id="chartLatency" class="ts-chart"></canvas></div>
+            <div class="chart-block"><div class="chart-title" style="color:#f87171">丢包 (pkt/s)</div><canvas id="chartLoss" class="ts-chart"></canvas></div>
+        </div>
+    </div>
+    <div id="chartReopen" class="reopen-tab" title="展开时序图">📈</div>
+
     <!-- Bottom playback bar -->
     <div id="playbackBar" class="glass">
         <button class="pb-btn primary" id="playPauseBtn" title="播放/暂停">▶</button>
@@ -409,9 +463,10 @@
     <div id="hintToast">点击链路或节点查看实时状态 · 右键取消选择</div>
 
     <!-- JavaScript Modules -->
-    <script src="../js/websocket.js?v=3e0"></script>
-    <script src="../js/cesium-manager.js?v=3e0"></script>
-    <script src="../js/ui-controller.js?v=3e0"></script>
-    <script src="../js/app.js?v=3e0"></script>
+    <script src="../js/websocket.js?v=3f0"></script>
+    <script src="../js/chart.js?v=3f0"></script>
+    <script src="../js/cesium-manager.js?v=3f0"></script>
+    <script src="../js/ui-controller.js?v=3f0"></script>
+    <script src="../js/app.js?v=3f0"></script>
 </body>
 </html>

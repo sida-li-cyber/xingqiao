@@ -98,6 +98,7 @@ class SatelliteVisualizationApp {
         this.nodeMetadata = {};
         this.currentRoute = null;
         this.ui.hideDetail();
+        this.ui.resetCharts();
 
         // Duration & timeline
         if (payload.duration) {
@@ -171,6 +172,7 @@ class SatelliteVisualizationApp {
             // Metrics summary → UI panel (throttled in UI layer)
             if (payload.metrics_summary) {
                 this.ui.updateMetricsSummary(payload.metrics_summary);
+                this.ui.pushCharts(payload.timestamp, payload.metrics_summary);
             }
 
             // Protocol v3: per-node packet telemetry

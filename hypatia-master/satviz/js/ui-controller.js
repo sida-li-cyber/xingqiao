@@ -84,9 +84,35 @@ class UIController {
             });
         }
 
+        // Link coloring mode (metrics-driven gradient)
+        const modeSelect = document.getElementById('metricsModeSelect');
+        if (modeSelect) {
+            modeSelect.addEventListener('change', (e) => {
+                this.cesium.setMetricsMode(e.target.value);
+            });
+        }
+
+        // Time-series charts (throughput / latency / loss vs sim time)
+        if (typeof TimeSeriesChart !== 'undefined') {
+            this.charts = {
+                throughput: new TimeSeriesChart('chartThroughput',
+                    { color: '#38bdf8', unit: 'Mbps', decimals: 1 }),
+                latency: new TimeSeriesChart('chartLatency',
+                    { color: '#fbbf24', unit: 'ms', decimals: 0 }),
+                loss: new TimeSeriesChart('chartLoss',
+                    { color: '#f87171', unit: 'pkt/s', decimals: 0 }),
+            };
+        } else {
+            this.charts = null;
+        }
+        this._lastChartT = null;
+        this._lastChartDrops = null;
+        this._lastChartPush = 0;
+
         // Panel collapse / reopen
         this._bindCollapse('layersPanel', 'layersCollapse', 'layersReopen');
         this._bindCollapse('statsPanel', 'statsCollapse', 'statsReopen');
+        this._bindCollapse('chartPanel', 'chartCollapse', 'chartReopen');
 
         // Detail panel close
         document.getElementById('detailClose').addEventListener('click', () => {
@@ -419,6 +445,49 @@ class UIController {
                 `切换丢包 <b style="color:var(--text)">${handover}</b> · ` +
                 `QoS丢包 高优先<b style="color:var(--text)">${lossPct(qHigh)}%</b>` +
                 `/尽力<b style="color:var(--text)">${lossPct(qLow)}%</b>`;
+        }
+    }
+
+    /**
+     * Feed the time-series charts (throttled to ~2Hz). Loss is plotted as an
+     * instantaneous rate (pkt/s) derived from the cumulative drop counter.
+     */
+    pushCharts(timestamp, summary) {
+        if (!this.charts || timestamp == null) return;
+        const now = Date.now();
+        if (now - this._lastChartPush < 500) return;
+        this._lastChartPush = now;
+
+        const thrMbps = (Number(summary.aggregate_throughput_bps) || 0) / 1e6;
+        const lat = Number(summary.avg_e2e_latency_ms) || 0;
+
+        let lossRate = 0;
+        const drops = Number(summary.pkts_dropped) || 0;
+        if (this._lastChartT != null && timestamp > this._lastChartT) {
+            const dt = timestamp - this._lastChartT;
+            const dd = drops - (this._lastChartDrops || 0);
+            if (dd >= 0) lossRate = dd / dt;
+        }
+        this._lastChartT = timestamp;
+        this._lastChartDrops = drops;
+
+        this.charts.throughput.push(timestamp, thrMbps);
+        this.charts.latency.push(timestamp, lat);
+        this.charts.loss.push(timestamp, lossRate);
+        this.charts.throughput.draw();
+        this.charts.latency.draw();
+        this.charts.loss.draw();
+    }
+
+    /** Clear chart buffers (called on simulation_init / restart). */
+    resetCharts() {
+        this._lastChartT = null;
+        this._lastChartDrops = null;
+        this._lastChartPush = 0;
+        if (this.charts) {
+            this.charts.throughput.clear();
+            this.charts.latency.clear();
+            this.charts.loss.clear();
         }
     }
 

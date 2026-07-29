@@ -346,7 +346,17 @@ class CesiumManager {
             const util = entity.properties.bandwidth_utilization
                 ? entity.properties.bandwidth_utilization.getValue()
                 : 0;
-            const color = this._getLinkDisplayColor(linkType, util);
+            const gv = (k) => (entity.properties[k] ? entity.properties[k].getValue() : 0);
+            const snap = {
+                bandwidth_utilization: util,
+                latency_ms: gv('latency_ms'),
+                loss_rate: gv('loss_rate'),
+                is_active: entity.properties.is_active
+                    ? entity.properties.is_active.getValue() : true,
+                queue_depth: gv('queue_depth'),
+                queue_capacity: gv('queue_capacity'),
+            };
+            const color = this._getLinkDisplayColor(linkType, util, snap);
             entity.polyline.material = new Cesium.PolylineDashMaterialProperty({
                 color: color,
             });
@@ -570,7 +580,7 @@ class CesiumManager {
             const util = properties.bandwidth_utilization || 0;
 
             if (!this.entities.links.has(linkId)) {
-                const color = this._getLinkDisplayColor(linkType, util);
+                const color = this._getLinkDisplayColor(linkType, util, properties);
                 const width = this._getLinkWidth(linkType);
 
                 const link = this.viewer.entities.add({
@@ -624,7 +634,7 @@ class CesiumManager {
                 const link = this.entities.links.get(linkId);
 
                 if (!this._highlightedLinks.has(linkId)) {
-                    const color = this._getLinkDisplayColor(linkType, util);
+                    const color = this._getLinkDisplayColor(linkType, util, properties);
                     const colorKey = color.toCssColorString();
                     const cached = this._linkColorCache.get(linkId);
                     if (cached !== colorKey) {
@@ -698,23 +708,12 @@ class CesiumManager {
      * Get link color: in metrics mode use gradient, otherwise use type color
      * with alpha modulated by utilization.
      */
-    _getLinkDisplayColor(linkType, utilization) {
+    _getLinkDisplayColor(linkType, utilization, props) {
         if (this.metricsMode !== 'none') {
-            let metricValue = 0;
-            switch (this.metricsMode) {
-                case 'bandwidth':
-                    metricValue = utilization;
-                    break;
-                case 'latency':
-                    metricValue = utilization; // caller normalizes
-                    break;
-                case 'loss_rate':
-                    metricValue = utilization;
-                    break;
-                default:
-                    metricValue = utilization;
-            }
-            return this._getGradientColor(metricValue);
+            return this._getGradientColor(
+                this._linkMetricValue(props || { bandwidth_utilization: utilization },
+                                      this.metricsMode)
+            );
         }
 
         // Default: type-based color, alpha scaled by utilization.
@@ -724,6 +723,38 @@ class CesiumManager {
         const quantized = Math.round(utilization * 10) / 10;
         const alpha = 0.3 + 0.7 * Math.max(0, Math.min(1, quantized));
         return base.withAlpha(alpha);
+    }
+
+    /**
+     * Normalize a link metric to 0..1 for the green→red gradient, based on
+     * the active coloring mode. `p` is a plain link-properties object.
+     */
+    _linkMetricValue(p, mode) {
+        let v;
+        switch (mode) {
+            case 'bandwidth':
+                v = p.bandwidth_utilization || 0;
+                break;
+            case 'queue': {
+                const cap = p.queue_capacity || 0;
+                v = cap > 0 ? (p.queue_depth || 0) / cap : 0;
+                break;
+            }
+            case 'latency':
+                v = (p.latency_ms || 0) / 50;
+                break;
+            case 'loss_rate':
+                v = (p.loss_rate || 0) * 100;
+                break;
+            case 'link_status':
+                v = p.is_active ? 0 : 1;
+                break;
+            default:
+                v = p.bandwidth_utilization || 0;
+        }
+        v = Math.max(0, Math.min(1, v));
+        // Quantize so per-tick jitter doesn't rebuild materials every frame.
+        return Math.round(v * 20) / 20;
     }
 
     _getLinkWidth(linkType) {
@@ -818,33 +849,23 @@ class CesiumManager {
 
             const props = link.properties;
             const linkType = props.linkType ? props.linkType.getValue() : 'isl';
-            let metricValue = 0;
+            const util = props.bandwidth_utilization || 0;
 
-            switch (mode) {
-                case 'bandwidth':
-                    metricValue = props.bandwidth_utilization || 0;
-                    break;
-                case 'latency':
-                    metricValue = Math.min(1, (props.latency_ms || 0) / 50);
-                    break;
-                case 'loss_rate':
-                    metricValue = Math.min(1, (props.loss_rate || 0) * 100);
-                    break;
-                case 'link_status':
-                    metricValue = (props.is_active) ? 0 : 1;
-                    break;
-                default:
-                    metricValue = props.bandwidth_utilization || 0;
-                    break;
-            }
+            // Plain snapshot of live per-link metrics for the color helper.
+            const snap = {
+                bandwidth_utilization: util,
+                latency_ms: props.latency_ms || 0,
+                loss_rate: props.loss_rate || 0,
+                is_active: props.is_active !== false,
+                queue_depth: props.queue_depth || 0,
+                queue_capacity: props.queue_capacity || 0,
+            };
 
-            const color = mode === 'none'
-                ? this._getLinkDisplayColor(linkType, props.bandwidth_utilization || 0)
-                : this._getGradientColor(metricValue);
-
+            const color = this._getLinkDisplayColor(linkType, util, snap);
             link.polyline.material = new Cesium.PolylineDashMaterialProperty({
                 color: color,
             });
+            this._linkColorCache.set(linkId, color.toCssColorString());
         }
     }
 
@@ -882,8 +903,18 @@ class CesiumManager {
                 const linkType = link.properties.linkType
                     ? link.properties.linkType.getValue()
                     : 'isl';
-                const util = link.properties.bandwidth_utilization || 0;
-                const color = this._getLinkDisplayColor(linkType, util);
+                const gv = (k) => (link.properties[k] ? link.properties[k].getValue() : 0);
+                const util = gv('bandwidth_utilization');
+                const snap = {
+                    bandwidth_utilization: util,
+                    latency_ms: gv('latency_ms'),
+                    loss_rate: gv('loss_rate'),
+                    is_active: link.properties.is_active
+                        ? link.properties.is_active.getValue() : true,
+                    queue_depth: gv('queue_depth'),
+                    queue_capacity: gv('queue_capacity'),
+                };
+                const color = this._getLinkDisplayColor(linkType, util, snap);
                 link.polyline.material = new Cesium.PolylineDashMaterialProperty({
                     color: color,
                 });
