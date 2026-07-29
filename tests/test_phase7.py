@@ -1,6 +1,6 @@
 """
 Phase 7 tests — thousand-satellite scale: constellation generation sanity,
-spatial-grid correctness, protocol 3.1 frame structure, and offline stress.
+spatial-grid correctness, protocol 3.2 frame structure, and offline stress.
 
   Test 12: generation sanity - preset counts / unique IDs / ISL = 2N /
            min degree >= 4; legacy 72 geometry identical to the default
@@ -8,7 +8,7 @@ spatial-grid correctness, protocol 3.1 frame structure, and offline stress.
   Test 13: spatial grid == brute force - grid_candidates prefilter yields
            exactly the same visible set as the full scan, incl. antimeridian
            and polar observers.
-  Test 14: protocol 3.1 frame structure - init carries sat_order +
+  Test 14: protocol 3.2 frame structure - init carries sat_order +
            isl_topology; state frames carry aligned sat_pos arrays, dynamic-
            only positions, short-key links, links_full / links_removed.
   Test 15: 440-sat offline stress (120 s sim) - exact conservation, real
@@ -159,17 +159,17 @@ def test_grid_equals_brute_force():
 
 
 # ----------------------------------------------------------------------
-# Test 14: protocol 3.1 frame structure
+# Test 14: protocol 3.2 frame structure
 # ----------------------------------------------------------------------
 
-def test_protocol_31_structure():
-    hdr("Test 14: protocol 3.1 frame structure")
+def test_protocol_32_structure():
+    hdr("Test 14: protocol 3.2 frame structure")
 
     core = DemoSimCore(scale=72)
     init = core.get_init_message()["payload"]
     gs_names = set(core.ground_stations.keys())
 
-    init_ok = (init["version"] == "3.1" and
+    init_ok = (init["version"] == "3.2" and
                len(init["sat_order"]) == 72 and
                len(init["isl_topology"]) == 144 and
                all("capacity_bps" in lt
@@ -284,7 +284,7 @@ if __name__ == "__main__":
     results = [
         ("12 generation", test_generation_sanity()),
         ("13 grid==brute", test_grid_equals_brute_force()),
-        ("14 protocol-3.1", test_protocol_31_structure()),
+        ("14 protocol-3.2", test_protocol_32_structure()),
     ]
     if not fast:
         results.append(("15 stress-440", test_stress_440()))
