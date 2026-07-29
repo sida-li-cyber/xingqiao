@@ -22,3 +22,6 @@ Thumbs.db
 
 # Simulation output
 hypatia-master/satviz/viz_output/
+
+# Backend file-transfer data plane (runtime uploads / reassembly)
+realtime_backend/data/

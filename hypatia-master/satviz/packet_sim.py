@@ -451,9 +451,19 @@ class PacketEngine:
             for v, w in self.adj[u]:
                 radj[v].append((u, w))
 
+        # Route towards background-flow sinks AND every active file-transfer
+        # destination. File destinations are included here (not just via
+        # self.sinks) because sync_flows rebuilds self.sinks from the
+        # background flows each tick, which would otherwise drop a file's
+        # destination and leave its chunks unroutable.
+        sinks = set(self.sinks)
+        for ft in self.files.values():
+            if ft.state == FT_TRANSFERRING:
+                sinks.add(ft.dst)
+
         transit = self.transit
         self.route = defaultdict(dict)
-        for sink in self.sinks:
+        for sink in sinks:
             dist = {sink: 0.0}
             next_hop = {}
             heap = [(0.0, sink)]

@@ -319,6 +319,8 @@ Hypatia 原生框架基于 ns-3（C++）做包级仿真，但存在以下问题�
 
 **产出 / 验收**：≥10 MB 文件目的端下载与原始**逐字节一致**（SHA-256）；高丢包下经重传仍完整送达且守恒精确；多文件并发高优先级先完成；1584 星叠加文件传输后核心仍 ≥20 ticks/s；旧前端连新后端不报错。分 A（控制面 + `test_phase8`）/ B（数据面 HTTP）/ C（前端）/ D（文档）四期。
 
+**进度**：A 期（控制面，`packet_sim` FileTransfer/ARQ + `tests/test_phase8`）✅；B 期（数据面）✅ —— 后端 `realtime_backend/files.py`（上传分片落盘 + DES 送达事件驱动重组 + SHA-256 校验）与 `files_api.py`（`/api/files` upload/list/download/delete），`main.py` 富化转发 `file_send`/`file_cancel` 并拦截核心 `file_event` 驱动重组，`demo_sim_core` 接入 `start_file/cancel_file/file_states/drain_file_events`、`state_update` 携带 `file_transfers`；修复 `sync_flows` 每 tick 覆盖 `sinks` 导致文件目的端不可路由的问题（`_refresh_routes` 并入活跃文件目的端）；`tests/test_file_e2e.py` 端到端验证真实字节落地（上传→传输→下载 SHA-256 一致 + 取消）。C 期（前端上传 / 追踪器 / 路径高亮 / 下载）、D 期（文档）待做。
+
 ### 功能里程碑 B — 包级动画脉冲化
 
 **目标**：把现有包级动画从「小圆点」（3 px 白点 + 青色描边，与卫星 / 地面站等节点的实心描边圆点视觉雷同、易混淆）改为**发光脉冲**，使「数据在链路上传输」一眼可辨、并与静态节点明确区分。

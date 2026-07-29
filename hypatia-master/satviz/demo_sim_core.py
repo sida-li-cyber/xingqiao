@@ -1076,6 +1076,12 @@ class DemoSimCore:
         dyn_positions = {nid: p for nid, p in positions.items()
                          if not nid.startswith("Sat-")}
 
+        # Milestone A: live file-transfer tracker (omitted when idle so the
+        # steady-state frame stays slim). Reaches the frontend tracker UI and
+        # the backend data plane alike.
+        file_transfers = (self.engine.file_states()
+                          if self.engine.files else None)
+
         return {
             "message_type": "state_update",
             "payload": {
@@ -1102,6 +1108,7 @@ class DemoSimCore:
                     # v3 Phase 3: per-priority QoS (0=high/UAV, 1=best-effort/ship)
                     "qos": summary["qos"],
                 },
+                "file_transfers": file_transfers,
             },
         }
 
@@ -1147,6 +1154,30 @@ class DemoSimCore:
         elif action == "view_preset":
             preset = params.get("preset", "global")
             print(f"  View preset: {preset}")
+        elif action == "file_send":
+            # Milestone A: the backend enriches params with total_bytes /
+            # chunk_size from the stored upload; we model the file as abstract
+            # chunks routed src -> dst with timeout-driven ARQ.
+            file_id = params.get("file_id")
+            if file_id:
+                self.engine.start_file(
+                    file_id=file_id,
+                    name=params.get("name", file_id),
+                    src=params.get("src", ""),
+                    dst=params.get("dst", ""),
+                    total_bytes=int(params.get("total_bytes", 0)),
+                    chunk_size=params.get("chunk_size"),
+                    prio=params.get("prio"),
+                    rate_cap_bps=params.get("rate_bps"),
+                )
+                print(f"  [file] send: {file_id} "
+                      f"({params.get('src')} -> {params.get('dst')}, "
+                      f"{params.get('total_bytes')} B)")
+        elif action == "file_cancel":
+            file_id = params.get("file_id")
+            if file_id:
+                self.engine.cancel_file(file_id)
+                print(f"  [file] cancelled: {file_id}")
 
     # ------------------------------------------------------------------
     # Main loop
@@ -1214,7 +1245,17 @@ class DemoSimCore:
 
                         # Send state
                         state_msg = self.get_state_update()
+
+                        # Milestone A: forward DES file events (chunk delivered
+                        # / complete / cancelled) to the backend data plane,
+                        # which reassembles the real bytes from them.
+                        file_events = self.engine.drain_file_events()
                         try:
+                            if file_events:
+                                await ws.send(json.dumps({
+                                    "message_type": "file_event",
+                                    "events": file_events,
+                                }))
                             await ws.send(json.dumps(state_msg))
                         except websockets.exceptions.ConnectionClosed:
                             print("\nSend failed, connection lost - reconnecting...")
