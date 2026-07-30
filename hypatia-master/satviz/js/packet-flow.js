@@ -24,10 +24,10 @@
  *   - dropped per-link in CesiumManager.removeLink()
  *   - pick-guarded in CesiumManager.setupEventHandlers() (type === 'packet')
  *
- * Milestone A tie-in:
- *   - setFilePath(nodes) spawns a single file-coloured pulse that travels the
- *     selected transfer's path (reusing the same glow), so "this lit streak is
- *     my file" is visually distinct from the link-typed background pulses.
+ * Note: the file-transfer path used to be shown here as a travelling pulse
+ * (setFilePath). It is now rendered by cesium-manager as animated moving
+ * dashes on the path's links (highlightFilePath), so this module only handles
+ * the background per-link traffic pulses.
  */
 
 class PacketFlowManager {
@@ -56,12 +56,6 @@ class PacketFlowManager {
         // --- Milestone B: glow rendering ------------------------------------
         /** colour-hex -> Cesium texture (singleton glow sprite cache). */
         this._texCache = new Map();
-
-        /** Dedicated colour for file-transfer pulses (distinct from traffic). */
-        this.filePulseColor = Cesium.Color.fromCssColorString('#FF4DD8');
-
-        /** file pulse state (Milestone A tie-in). */
-        this._filePulse = null; // { entity, nodes, color, speed, scratch }
     }
 
     // ======================================================================
@@ -75,7 +69,6 @@ class PacketFlowManager {
             this._removeAll();
         } else {
             this.sync();
-            if (this._filePulse) this._respawnFilePulse();
         }
     }
 
@@ -161,28 +154,6 @@ class PacketFlowManager {
             }
             // else: count & endpoints unchanged — keep existing packets.
         }
-    }
-
-    /**
-     * Milestone A tie-in: show a file-coloured pulse travelling the given path
-     * (node-id list, src -> ... -> dst). Pass null / empty to remove it.
-     */
-    setFilePath(nodes, color) {
-        this._removeFilePulse();
-        if (!nodes || nodes.length < 2) return;
-        this._filePulse = {
-            nodes: nodes.slice(),
-            color: color || this.filePulseColor,
-            speed: 1 / 1600, // path-traversal phase units per ms
-            scratch: new Cesium.Cartesian3(),
-            entity: null,
-        };
-        if (this.enabled) this._respawnFilePulse();
-    }
-
-    /** True when a file pulse is active (used to skip the auto route cycle). */
-    hasFilePulse() {
-        return !!this._filePulse;
     }
 
     // ======================================================================
@@ -321,70 +292,6 @@ class PacketFlowManager {
         return entity;
     }
 
-    // --- File pulse (Milestone A tie-in) ----------------------------------
-
-    /** (Re)create the file pulse entity from the stored state. */
-    _respawnFilePulse() {
-        if (!this._filePulse) return;
-        this._removeFilePulseEntity();
-        const fp = this._filePulse;
-        const cm = this.cm;
-        const col = new Cesium.Color();
-
-        fp.entity = cm.viewer.entities.add({
-            position: new Cesium.CallbackProperty(() => {
-                const nodes = fp.nodes;
-                const n = nodes.length;
-                if (n < 2) return undefined;
-                const now = (typeof performance !== 'undefined')
-                    ? performance.now() : Date.now();
-                const u = (now * fp.speed) % 1;
-                const f = u * (n - 1);
-                let i = Math.floor(f);
-                if (i > n - 2) i = n - 2;
-                const a = cm._sampleNode(nodes[i]);
-                const b = cm._sampleNode(nodes[i + 1]);
-                if (!a || !b) return undefined;
-                Cesium.Cartesian3.lerp(a, b, f - i, fp.scratch);
-                return fp.scratch;
-            }, false),
-            billboard: {
-                image: this._glowCanvas(fp.color),
-                color: new Cesium.CallbackProperty(() => {
-                    const now = (typeof performance !== 'undefined')
-                        ? performance.now() : Date.now();
-                    const ph = (now * fp.speed * 3) % 1;
-                    const a = 0.7 + 0.3 * Math.sin(ph * Math.PI * 2);
-                    return Cesium.Color.clone(fp.color, col).withAlpha(a);
-                }, false),
-                scale: new Cesium.CallbackProperty(() => {
-                    const now = (typeof performance !== 'undefined')
-                        ? performance.now() : Date.now();
-                    const ph = (now * fp.speed * 3) % 1;
-                    return 1.15 * (0.85 + 0.3 * (0.5 + 0.5 * Math.sin(ph * Math.PI * 2)));
-                }, false),
-                width: 30,
-                height: 30,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            },
-            properties: { type: 'file_pulse' },
-        });
-    }
-
-    /** Remove just the file pulse entity (keeps state for re-enable). */
-    _removeFilePulseEntity() {
-        if (this._filePulse && this._filePulse.entity) {
-            this.cm.viewer.entities.remove(this._filePulse.entity);
-            this._filePulse.entity = null;
-        }
-    }
-
-    /** Remove the file pulse entity and forget its state. */
-    _removeFilePulse() {
-        this._removeFilePulseEntity();
-        this._filePulse = null;
-    }
-
     /** Remove all packet entities for one link record (does not delete map). */
     _removeLinkPackets(rec) {
         for (const ent of rec.packets) {
@@ -395,14 +302,13 @@ class PacketFlowManager {
         rec.packets = [];
     }
 
-    /** Remove every packet entity (and the file pulse) and reset all state. */
+    /** Remove every packet entity and reset all state. */
     _removeAll() {
         for (const ent of this._all) {
             this.cm.viewer.entities.remove(ent);
         }
         this._all = [];
         this._byLink.clear();
-        this._removeFilePulse();
     }
 }
 

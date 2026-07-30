@@ -4,6 +4,134 @@
  * and four link types (ISL / GSL / SUL / SSL).
  */
 
+// ============================================================================
+// Moving-dash material (file-transfer path highlight)
+// ============================================================================
+//
+// A variant of Cesium's built-in PolylineDash material whose dash pattern is
+// shifted by an animated `offset` uniform, producing "marching ants" that flow
+// along the line. Used to visualise an in-flight file transfer's route, with
+// the dashes travelling in the transmission direction (src -> dst).
+//
+// The shader deliberately keeps the literal `in float v_polylineAngle;` line:
+// Cesium's polyline pipeline regex-scans the material source for that exact
+// string to decide whether to emit the ANGLE_VARYING define, so it must not be
+// reformatted or renamed.
+
+const MOVING_DASH_SOURCE = `uniform vec4 color;
+uniform vec4 gapColor;
+uniform float dashLength;
+uniform float dashPattern;
+uniform float offset;
+in float v_polylineAngle;
+
+const float maskLength = 16.0;
+
+mat2 rotate(float rad) {
+    float c = cos(rad);
+    float s = sin(rad);
+    return mat2(
+        c, s,
+        -s, c
+    );
+}
+
+czm_material czm_getMaterial(czm_materialInput materialInput)
+{
+    czm_material material = czm_getDefaultMaterial(materialInput);
+
+    vec2 pos = rotate(v_polylineAngle) * gl_FragCoord.xy;
+
+    // Relative position within the dash cycle, shifted by the animated offset.
+    float dashPosition = fract((pos.x / (dashLength * czm_pixelRatio)) + offset);
+    float maskIndex = floor(dashPosition * maskLength);
+    float maskTest = floor(dashPattern / pow(2.0, maskIndex));
+    vec4 fragColor = (mod(maskTest, 2.0) < 1.0) ? gapColor : color;
+    if (fragColor.a < 0.005) {
+        discard;
+    }
+
+    fragColor = czm_gammaCorrect(fragColor);
+    material.emission = fragColor.rgb;
+    material.alpha = fragColor.a;
+    return material;
+}
+`;
+
+// Sign of the dash-flow direction. In Cesium's screen-space dash shader an
+// INCREASING offset slides the dashes toward the polyline's FIRST position, so
+// flowing toward the SECOND position (our downstream) needs a negative sign.
+// Flip to +1 if the flow ever renders backwards.
+const FLOW_SIGN = -1;
+
+let _movingDashRegistered = false;
+function ensureMovingDashMaterial() {
+    if (_movingDashRegistered) return;
+    Cesium.Material._materialCache.addMaterial('PolylineMovingDash', {
+        fabric: {
+            type: 'PolylineMovingDash',
+            uniforms: {
+                color: new Cesium.Color(1, 0, 1, 1),
+                gapColor: new Cesium.Color(0, 0, 0, 0),
+                dashLength: 16.0,
+                dashPattern: 255.0,
+                offset: 0.0,
+            },
+            source: MOVING_DASH_SOURCE,
+        },
+        translucent: true,
+    });
+    _movingDashRegistered = true;
+}
+
+/**
+ * A MaterialProperty rendering the PolylineMovingDash material. The dash phase
+ * is advanced every frame by the owning CesiumManager (see _animateMovingDashes
+ * calling tick()), which makes the dashes march along the polyline.
+ *
+ * `direction` is +1 when the desired flow matches the polyline's
+ * positions[0] -> positions[1] order (link source -> target) and -1 when the
+ * transfer traverses the link in the opposite direction.
+ */
+class MovingDashMaterialProperty {
+    constructor(options = {}) {
+        this._color = options.color || Cesium.Color.MAGENTA;
+        this._gapColor = options.gapColor || new Cesium.Color(0, 0, 0, 0);
+        this._dashLength = options.dashLength || 16.0;
+        this._dashPattern = options.dashPattern || 255.0;
+        this._direction = options.direction || 1;
+        this._speed = options.speed || 1.5;   // dash-cycles per second
+        this._uniforms = null;                // live uniforms object (captured)
+        this._definitionChanged = new Cesium.Event();
+    }
+
+    get isConstant() { return true; }
+    get definitionChanged() { return this._definitionChanged; }
+
+    getType() { return 'PolylineMovingDash'; }
+
+    getValue(time, result) {
+        if (!Cesium.defined(result)) result = {};
+        result.color = this._color;
+        result.gapColor = this._gapColor;
+        result.dashLength = this._dashLength;
+        result.dashPattern = this._dashPattern;
+        result.offset = 0.0;
+        this._uniforms = result;   // keep a live reference for per-frame updates
+        return result;
+    }
+
+    /** Advance the dash phase. Called every frame by the owning manager. */
+    tick(nowSeconds) {
+        if (this._uniforms) {
+            this._uniforms.offset =
+                FLOW_SIGN * this._direction * this._speed * nowSeconds;
+        }
+    }
+
+    equals(other) { return this === other; }
+}
+
 class CesiumManager {
     constructor(containerId, options = {}) {
         this.containerId = containerId;
@@ -101,6 +229,14 @@ class CesiumManager {
         // Highlighted route path
         this._highlightedLinks = new Set();
 
+        // File-transfer path links currently wearing an animated moving-dash
+        // material (linkId -> MovingDashMaterialProperty). Advanced per frame.
+        this._movingDashes = new Map();
+
+        // setTimeout id that auto-clears the file-path highlight after its hold
+        // period (see highlightFilePath). null when no highlight is pending.
+        this._highlightTimeoutId = null;
+
         // Performance: cache last color per link to avoid redundant material updates
         this._linkColorCache = new Map(); // linkId -> last color string
         this._batchDepth = 0;
@@ -161,6 +297,12 @@ class CesiumManager {
             if (typeof PacketFlowManager !== 'undefined') {
                 this.packetFlow = new PacketFlowManager(this);
             }
+
+            // Register the animated moving-dash material (file-path highlight)
+            // and advance its dash phase every frame.
+            ensureMovingDashMaterial();
+            this.scene.preRender.addEventListener(
+                () => this._animateMovingDashes());
 
             this.setupEventHandlers();
             this.startFpsCounter();
@@ -690,6 +832,7 @@ class CesiumManager {
             this.viewer.entities.remove(link);
             this.entities.links.delete(linkId);
             this._highlightedLinks.delete(linkId);
+            this._movingDashes.delete(linkId);
             this._linkColorCache.delete(linkId);
             this.stats.links = Math.max(0, this.stats.links - 1);
         }
@@ -705,9 +848,14 @@ class CesiumManager {
     syncLinks(linksData) {
         const incomingIds = new Set(Object.keys(linksData));
 
-        // Remove links no longer present
+        // Remove links no longer present. Links that are part of an active
+        // file-path highlight are kept alive for the highlight's hold period
+        // even though the incremental stream has dropped them (they went idle
+        // once the transfer finished); they are pruned normally on the next
+        // sync after clearRouteHighlights() releases them.
         for (const existingId of this.entities.links.keys()) {
-            if (!incomingIds.has(existingId)) {
+            if (!incomingIds.has(existingId)
+                    && !this._highlightedLinks.has(existingId)) {
                 this.removeLink(existingId);
             }
         }
@@ -987,7 +1135,77 @@ class CesiumManager {
         }
     }
 
+    /**
+     * Highlight a file-transfer path (node-id list, src -> ... -> dst) by
+     * dressing each traversed link in an animated moving-dash material whose
+     * dashes flow in the transmission direction. Used for the selected file
+     * transfer (see ui-controller._applyFileHighlight); the auto route cycle
+     * keeps using highlightRoute().
+     */
+    highlightFilePath(pathNodes, holdSeconds = 5) {
+        this.clearRouteHighlights();
+
+        if (!pathNodes || pathNodes.length < 2) return;
+
+        const color = Cesium.Color.fromCssColorString('#FF4DD8'); // file magenta
+
+        for (let i = 0; i < pathNodes.length - 1; i++) {
+            const a = pathNodes[i];
+            const b = pathNodes[i + 1];
+            const link = this.entities.links.get(`${a}--${b}`)
+                || this.entities.links.get(`${b}--${a}`);
+            if (!link) continue;
+
+            // Traversal direction relative to the link's own orientation
+            // (positions[0] = source, positions[1] = target).
+            const src = link.properties.source
+                ? link.properties.source.getValue() : null;
+            const tgt = link.properties.target
+                ? link.properties.target.getValue() : null;
+            const direction = (src === b && tgt === a) ? -1 : 1;
+
+            const linkId = link.properties.linkId
+                ? link.properties.linkId.getValue() : `${a}--${b}`;
+
+            const prop = new MovingDashMaterialProperty({
+                color: color,
+                direction: direction,
+                dashLength: 16.0,
+                speed: 1.5,
+            });
+            link.polyline.material = prop;
+            link.polyline.width = new Cesium.ConstantProperty(3);
+
+            this._highlightedLinks.add(linkId);
+            this._movingDashes.set(linkId, prop);
+        }
+
+        // Auto-clear after the hold period so the full route is displayed for
+        // a fixed window and then released (previously the still-active last
+        // segment kept its dashes forever while idle segments were pruned).
+        if (holdSeconds > 0 && this._highlightedLinks.size) {
+            this._highlightTimeoutId = setTimeout(() => {
+                this._highlightTimeoutId = null;
+                this.clearRouteHighlights();
+            }, holdSeconds * 1000);
+        }
+    }
+
+    /** Advance the dash phase of every active moving-dash material (preRender). */
+    _animateMovingDashes() {
+        if (!this._movingDashes.size) return;
+        const now = (typeof performance !== 'undefined'
+            ? performance.now() : Date.now()) / 1000;
+        for (const prop of this._movingDashes.values()) {
+            prop.tick(now);
+        }
+    }
+
     clearRouteHighlights() {
+        if (this._highlightTimeoutId) {
+            clearTimeout(this._highlightTimeoutId);
+            this._highlightTimeoutId = null;
+        }
         for (const linkId of this._highlightedLinks) {
             const link = this.entities.links.get(linkId);
             if (link && link !== this.selectedEntity) {
@@ -1015,6 +1233,7 @@ class CesiumManager {
             }
         }
         this._highlightedLinks.clear();
+        this._movingDashes.clear();
     }
 
     // ======================================================================
