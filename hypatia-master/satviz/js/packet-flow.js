@@ -1,39 +1,166 @@
 /**
- * Packet Flow Animation Module v4 — Milestone B (pulse rendering)
+ * Packet Flow Animation Module v5 — wave-antinode rendering
  *
- * Renders soft-glow "energy pulses" that glide along active links, giving an
- * intuitive sense of traffic direction and load. Milestone B replaces the old
- * hard-edged 3px points (which read as just another node dot) with glowing,
- * throbbing billboards so "data moving along a link" is unmistakable and
- * clearly distinct from the solid node markers.
+ * Renders traffic as a travelling "antinode" (波腹) that rides ON each active
+ * link: the dashed line locally thickens into a bright core with a tight glow
+ * halo, and that bulge glides from the link's source toward its target. This
+ * replaces the old free-floating glow billboards, which read as separate dots
+ * and competed visually with the file-path moving-dash highlight.
  *
- * This is a purely cosmetic layer:
- *   - It NEVER touches link polyline materials, so the existing color-cache /
- *     metrics-gradient logic in CesiumManager is left completely untouched.
- *   - Pulse motion is driven by wall time (not sim time), so it stays smooth
- *     at any playback speed and even while the sim is paused.
- *   - Pulse density and speed scale with each link's bandwidth utilization.
- *   - A single shared glow texture (radial-gradient canvas) is cached and
- *     reused for every pulse; per-pulse colour is applied via the billboard
- *     `color` (additive-style white-hot core tints to the set colour).
+ * Design notes:
+ *   - One overlay polyline per active link (coincident with the link itself),
+ *     dressed in a custom `PolylinePulseWave` material. The shader uses the
+ *     polyline texture coordinates (st.s = 0..1 along the line, st.t = 0..1
+ *     across it) to place `pulseCount` bulges and advance them with an
+ *     animated `phase` uniform — so the bulges stay glued to the geometry
+ *     (they rotate with the globe) instead of being screen-anchored.
+ *   - The overlay width (i.e. the bulge / glow size) shrinks as the camera
+ *     zooms out, so the animation doesn't turn into dense noise at global
+ *     scale. Width is recomputed once per frame from the camera height.
+ *   - The base link polylines are NEVER touched (same as before): this stays
+ *     a purely cosmetic layer over the metrics-driven link materials.
+ *
+ * Interaction with the file-path highlight (cesium-manager.highlightFilePath):
+ *   - Direction 1: links that are part of the selected transfer's path already
+ *     wear animated moving dashes, so sync() skips them — no pulse is layered
+ *     on top of the highlight.
+ *   - Direction 2: while a file path is selected, `dimAlpha` is lowered so the
+ *     remaining background pulses recede and the magenta route stands out.
  *
  * Integration points (see cesium-manager.js):
  *   - created in CesiumManager.initialize()
  *   - reconciled at the end of CesiumManager.syncLinks()
+ *   - re-synced when the file-path highlight is applied / cleared
  *   - cleared in CesiumManager.clearAll()
  *   - dropped per-link in CesiumManager.removeLink()
  *   - pick-guarded in CesiumManager.setupEventHandlers() (type === 'packet')
- *
- * Note: the file-transfer path used to be shown here as a travelling pulse
- * (setFilePath). It is now rendered by cesium-manager as animated moving
- * dashes on the path's links (highlightFilePath), so this module only handles
- * the background per-link traffic pulses.
  */
+
+// --- Wave-antinode material -------------------------------------------------
+// The bulge envelope travels along st.s (0 at the link source, 1 at target);
+// increasing `phase` advances it toward the target. Across the line, a bright
+// core (the "thickened" line) falls off into a soft glow halo. `globalAlpha`
+// is the master dim used while a file path is selected.
+const PULSE_WAVE_SOURCE = `uniform vec4 color;
+uniform float phase;
+uniform float pulseCount;
+uniform float bulgeLength;
+uniform float glowRadius;
+uniform float globalAlpha;
+
+czm_material czm_getMaterial(czm_materialInput materialInput)
+{
+    czm_material material = czm_getDefaultMaterial(materialInput);
+    vec2 st = materialInput.st;
+
+    // Along the line: pulseCount bulges, each centred at u = 0.5 within its
+    // period. fract() keeps the pattern seamless as phase advances.
+    float u = fract(st.s * pulseCount - phase);
+    float dAlong = abs(u - 0.5);
+    float halfLen = max(bulgeLength * 0.5, 0.001);
+    float env = 1.0 - smoothstep(halfLen * 0.3, halfLen, dAlong);
+
+    // Across the line: bright core (thickened line) + soft glow halo.
+    float across = abs(st.t - 0.5) * 2.0;
+    float core = 1.0 - smoothstep(0.0, 0.45, across);
+    float glow = 1.0 - smoothstep(0.3, glowRadius, across);
+    float shape = max(core, glow * 0.4);
+
+    float a = env * shape * globalAlpha;
+    if (a < 0.005) {
+        discard;
+    }
+
+    // White-hot centre so the bulge reads as energy on the line.
+    vec3 col = mix(color.rgb, vec3(1.0), core * 0.35);
+    vec4 fragColor = czm_gammaCorrect(vec4(col, color.a * a));
+    material.emission = fragColor.rgb;
+    material.alpha = fragColor.a;
+    return material;
+}
+`;
+
+// Overlay width (px) when fully zoomed in — the maximum bulge/glow diameter.
+const BASE_PULSE_WIDTH = 8.0;
+// Camera height (m) at which the pulse is at full size; higher (zoomed out)
+// shrinks it proportionally so the animation stays sparse at global scale.
+const PULSE_REF_HEIGHT = 2000000.0;
+// Floor for the zoom-based scale factor (keeps a faint pulse when far out).
+const PULSE_MIN_SCALE = 0.12;
+
+let _pulseWaveRegistered = false;
+function ensurePulseWaveMaterial() {
+    if (_pulseWaveRegistered) return;
+    Cesium.Material._materialCache.addMaterial('PolylinePulseWave', {
+        fabric: {
+            type: 'PolylinePulseWave',
+            uniforms: {
+                color: new Cesium.Color(1, 1, 1, 1),
+                phase: 0.0,
+                pulseCount: 1.0,
+                bulgeLength: 0.45,
+                glowRadius: 1.0,
+                globalAlpha: 1.0,
+            },
+            source: PULSE_WAVE_SOURCE,
+        },
+        translucent: true,
+    });
+    _pulseWaveRegistered = true;
+}
+
+/**
+ * A MaterialProperty for the PolylinePulseWave material. The `phase` and
+ * `globalAlpha` uniforms are advanced every frame by the owning manager via
+ * tick(), which mutates the material's live uniforms object (captured in
+ * getValue). Mirrors the MovingDashMaterialProperty pattern in cesium-manager.
+ */
+class PulseWaveMaterialProperty {
+    constructor(options = {}) {
+        this._color = options.color || Cesium.Color.WHITE;
+        this._pulseCount = options.pulseCount || 1;
+        this._bulgeLength = options.bulgeLength || 0.45;
+        this._glowRadius = options.glowRadius || 1.0;
+        this._phaseRate = options.phaseRate || 1.0;  // phase cycles / second
+        this._uniforms = null;                        // live uniforms (captured)
+        this._definitionChanged = new Cesium.Event();
+    }
+
+    get isConstant() { return true; }
+    get definitionChanged() { return this._definitionChanged; }
+
+    getType() { return 'PolylinePulseWave'; }
+
+    getValue(time, result) {
+        if (!Cesium.defined(result)) result = {};
+        result.color = this._color;
+        result.phase = 0.0;
+        result.pulseCount = this._pulseCount;
+        result.bulgeLength = this._bulgeLength;
+        result.glowRadius = this._glowRadius;
+        result.globalAlpha = 1.0;
+        this._uniforms = result;   // keep a live reference for per-frame updates
+        return result;
+    }
+
+    /** Advance the bulge phase + apply the master dim. Called every frame. */
+    tick(nowSeconds, globalAlpha) {
+        if (this._uniforms) {
+            // Wrap at 1.0 (the pattern's period in phase) to keep the float
+            // small and precise even after long runtimes.
+            this._uniforms.phase = (nowSeconds * this._phaseRate) % 1.0;
+            this._uniforms.globalAlpha = globalAlpha;
+        }
+    }
+
+    equals(other) { return this === other; }
+}
 
 class PacketFlowManager {
     /**
      * @param {CesiumManager} cm - The owning CesiumManager instance. Used to
-     *   reach the viewer, the entity stores, and the node-position sampler.
+     *   reach the viewer/scene, the entity stores, and the node-position
+     *   sampler (_sampleNode).
      */
     constructor(cm) {
         this.cm = cm;
@@ -41,28 +168,27 @@ class PacketFlowManager {
         /** Master on/off switch (UI toggle). */
         this.enabled = true;
 
-        /** Hard cap on simultaneous packet entities (perf guard). */
-        this.maxPackets = 250;
+        /**
+         * Master alpha multiplier for all pulses (Direction 2). Lowered while
+         * a file-transfer path is selected so the background recedes.
+         */
+        this.dimAlpha = 1.0;
 
-        /** linkId -> { srcId, tgtId, count, packets: [entity, ...] } */
+        /** linkId -> { srcId, tgtId, count, entity, prop } */
         this._byLink = new Map();
 
-        /** Flat list of every live packet entity (for quick total counts). */
-        this._all = [];
+        /** Overlay width for the current frame (zoom-linked, see _animate). */
+        this._currentWidth = BASE_PULSE_WIDTH;
 
-        /** Reusable scratch vector for per-frame lerp (avoids GC churn). */
-        this._scratch = new Cesium.Cartesian3();
-
-        // --- Milestone B: glow rendering ------------------------------------
-        /** colour-hex -> Cesium texture (singleton glow sprite cache). */
-        this._texCache = new Map();
+        ensurePulseWaveMaterial();
+        this.cm.scene.preRender.addEventListener(() => this._animate());
     }
 
     // ======================================================================
     // Public API
     // ======================================================================
 
-    /** Turn the animation on/off. Turning off removes all packet entities. */
+    /** Turn the animation on/off. Turning off removes all overlay entities. */
     setEnabled(on) {
         this.enabled = !!on;
         if (!this.enabled) {
@@ -72,35 +198,40 @@ class PacketFlowManager {
         }
     }
 
-    /** Remove every packet entity and forget all per-link state. */
+    /** Remove every overlay entity and forget all per-link state. */
     clear() {
         this._removeAll();
     }
 
-    /** Drop all packets belonging to a single link (called on link removal). */
+    /** Drop the overlay belonging to a single link (called on link removal). */
     dropLink(linkId) {
         const rec = this._byLink.get(linkId);
         if (rec) {
-            this._removeLinkPackets(rec);
+            this._removeOverlay(rec);
             this._byLink.delete(linkId);
         }
     }
 
     /**
-     * Reconcile packet entities with the current set of active links.
-     * Called at the end of CesiumManager.syncLinks() (≈5Hz).
+     * Reconcile overlay entities with the current set of active links.
+     * Called at the end of CesiumManager.syncLinks() (≈5Hz) and whenever the
+     * file-path highlight is applied / cleared.
      */
     sync() {
         if (!this.enabled) return;
 
         const links = this.cm.entities.links;
+        const highlighted = this.cm._highlightedLinks;
 
-        // --- Pass 1: compute desired packet count per active link ---------
+        // --- Pass 1: compute desired overlays ------------------------------
         const desired = new Map(); // linkId -> {srcId, tgtId, n}
-        let total = 0;
         for (const [linkId, link] of links.entries()) {
             const p = link.properties;
             if (!p) continue;
+
+            // Direction 1: the selected file path already shows moving dashes
+            // on its links — don't layer a traffic bulge on top of them.
+            if (highlighted && highlighted.has(linkId)) continue;
 
             const isActive = this._gv(p, 'is_active', true) !== false;
             if (!isActive) continue;
@@ -110,49 +241,30 @@ class PacketFlowManager {
             if (!srcId || !tgtId) continue;
 
             const util = Math.max(0, Math.min(1, this._gv(p, 'bandwidth_utilization', 0)));
-            // 1..4 packets: busier links carry more visible packets.
-            let n = 1 + Math.min(3, Math.floor(util * 4));
+            // 1..3 antinodes: busier links carry more visible bulges.
+            const n = 1 + Math.min(2, Math.floor(util * 3));
 
             desired.set(linkId, { srcId, tgtId, n });
-            total += n;
         }
 
-        // --- Pass 2: enforce the global cap via proportional scaling ------
-        if (total > this.maxPackets && total > 0) {
-            const factor = this.maxPackets / total;
-            for (const rec of desired.values()) {
-                rec.n = Math.floor(rec.n * factor); // may drop to 0
-            }
-        }
-
-        // --- Pass 3: drop packets for links that are gone / scaled to 0 ---
+        // --- Pass 2: drop overlays that are gone / changed -----------------
         for (const [linkId, rec] of this._byLink.entries()) {
             const want = desired.get(linkId);
-            if (!want || want.n <= 0) {
-                this._removeLinkPackets(rec);
+            const changed = !want ||
+                want.srcId !== rec.srcId ||
+                want.tgtId !== rec.tgtId ||
+                want.n !== rec.count;
+            if (changed) {
+                this._removeOverlay(rec);
                 this._byLink.delete(linkId);
             }
         }
 
-        // --- Pass 4: add / rebuild packets to match the desired counts ----
+        // --- Pass 3: spawn overlays that are missing -----------------------
         for (const [linkId, want] of desired.entries()) {
-            if (want.n <= 0) continue;
-
-            const existing = this._byLink.get(linkId);
-            const needsRebuild =
-                !existing ||
-                existing.count !== want.n ||
-                existing.srcId !== want.srcId ||
-                existing.tgtId !== want.tgtId;
-
-            if (needsRebuild) {
-                if (existing) {
-                    this._removeLinkPackets(existing);
-                    this._byLink.delete(linkId);
-                }
-                this._spawnForLink(linkId, want.srcId, want.tgtId, want.n);
+            if (!this._byLink.has(linkId)) {
+                this._spawnOverlay(linkId, want.srcId, want.tgtId, want.n);
             }
-            // else: count & endpoints unchanged — keep existing packets.
         }
     }
 
@@ -169,146 +281,91 @@ class PacketFlowManager {
     }
 
     /**
-     * Singleton radial-gradient glow sprite, cached per colour (few distinct
-     * hues). A white-hot core lets the per-entity billboard `color` tint the
-     * body while the centre stays bright, producing an "energy pulse" look.
-     * Returns an HTMLCanvasElement — Cesium entity billboards accept a canvas
-     * as `image` and manage the GPU texture internally, so one cached sprite
-     * per colour is reused across all pulses (no per-packet image creation).
+     * Overlay width for the current camera zoom. Full size at PULSE_REF_HEIGHT
+     * and below; shrinks inversely with camera height above that, clamped to
+     * PULSE_MIN_SCALE, so the pulses stay small and sparse when zoomed out.
      */
-    _glowCanvas(color) {
-        const hex = color.toCssColorString();
-        const cached = this._texCache.get(hex);
-        if (cached) return cached;
-
-        const size = 64;
-        const cv = document.createElement('canvas');
-        cv.width = size;
-        cv.height = size;
-        const ctx = cv.getContext('2d');
-        const g = ctx.createRadialGradient(
-            size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-        g.addColorStop(0.0, 'rgba(255,255,255,1)');
-        g.addColorStop(0.18, 'rgba(255,255,255,0.95)');
-        g.addColorStop(0.42, color.toCssHexString());
-        g.addColorStop(1.0, 'rgba(0,0,0,0)');
-        ctx.fillStyle = g;
-        ctx.fillRect(0, 0, size, size);
-
-        this._texCache.set(hex, cv);
-        return cv;
+    _pulseWidth() {
+        let h = PULSE_REF_HEIGHT;
+        try {
+            const carto = this.cm.viewer.camera.positionCartographic;
+            if (carto && isFinite(carto.height)) h = carto.height;
+        } catch (e) { /* 2D / morphing — fall back to full size */ }
+        const scale = Cesium.Math.clamp(
+            PULSE_REF_HEIGHT / Math.max(h, 1.0), PULSE_MIN_SCALE, 1.0);
+        return BASE_PULSE_WIDTH * scale;
     }
 
-    /** Create `count` pulse entities for a link and record them. */
-    _spawnForLink(linkId, srcId, tgtId, count) {
-        // Read utilization once for traversal speed + glow size (cosmetic).
-        const link = this.cm.entities.links.get(linkId);
+    /** Create the wave-antinode overlay polyline for a single link. */
+    _spawnOverlay(linkId, srcId, tgtId, count) {
+        const cm = this.cm;
+        const link = cm.entities.links.get(linkId);
         const linkType = link && link.properties
             ? this._gv(link.properties, 'linkType', 'isl') : 'isl';
         const util = link && link.properties
             ? Math.max(0, Math.min(1, this._gv(link.properties, 'bandwidth_utilization', 0)))
             : 0;
 
-        // Busier links traverse faster: 1200ms (idle) -> 500ms (saturated).
+        // Bulge colour follows the link type; busier links traverse faster.
+        const color = cm.linkTypeColors[linkType] || Cesium.Color.WHITE;
         const traversalMs = 1200 - 700 * util;
-        const speed = 1 / traversalMs; // phase-units per ms
+        // phase cycles/second so each antinode crosses the line in traversalMs
+        // (pulse speed = phaseRate / count = 1000 / traversalMs line/s).
+        const phaseRate = (count * 1000) / traversalMs;
 
-        // Pulse colour follows the link type; glow grows slightly with load.
-        const color = this.cm.linkTypeColors[linkType] || Cesium.Color.WHITE;
-        const baseScale = 0.55 + 0.5 * util;
-
-        const packets = [];
-        for (let i = 0; i < count; i++) {
-            if (this._all.length >= this.maxPackets) break;
-            const ent = this._spawnPacket(linkId, srcId, tgtId, speed,
-                                          i / count, color, baseScale);
-            if (ent) packets.push(ent);
-        }
-
-        this._byLink.set(linkId, { srcId, tgtId, count: packets.length, packets });
-    }
-
-    /**
-     * Create a single glowing pulse billboard whose position lerps from the
-     * live source-node position to the live target-node position, cycling
-     * forever, with scale + alpha throbbing over the travel phase.
-     */
-    _spawnPacket(linkId, srcId, tgtId, speed, phase0, color, baseScale) {
-        const cm = this.cm;
-        const scratch = this._scratch;
-
-        // Per-packet mutable state captured by the closure.
-        const pk = {
-            lastPos: new Cesium.Cartesian3(),
-            hasPos: false,
-            col: new Cesium.Color(), // reused colour result (avoids GC churn)
-        };
+        const prop = new PulseWaveMaterialProperty({
+            color: color,
+            pulseCount: count,
+            phaseRate: phaseRate,
+        });
 
         const entity = cm.viewer.entities.add({
-            position: new Cesium.CallbackProperty(() => {
-                const src = cm._sampleNode(srcId);
-                const tgt = cm._sampleNode(tgtId);
-                if (!src || !tgt) {
-                    // Endpoints not ready — hold the last known position.
-                    return pk.hasPos ? pk.lastPos : undefined;
-                }
-                const now = (typeof performance !== 'undefined')
-                    ? performance.now() : Date.now();
-                const phase = (now * speed + phase0) % 1;
-                Cesium.Cartesian3.lerp(src, tgt, phase, scratch);
-                Cesium.Cartesian3.clone(scratch, pk.lastPos);
-                pk.hasPos = true;
-                return scratch;
-            }, false),
-            billboard: {
-                image: this._glowCanvas(color),
-                color: new Cesium.CallbackProperty(() => {
-                    const now = (typeof performance !== 'undefined')
-                        ? performance.now() : Date.now();
-                    const ph = (now * speed + phase0) % 1;
-                    // Throb the brightness over the travel phase.
-                    const a = 0.55 + 0.45 * (0.5 + 0.5 * Math.sin(ph * Math.PI * 2));
-                    // Fade near the endpoints so pulses emerge / dissolve.
-                    const edge = Math.min(1, Math.min(ph, 1 - ph) * 6);
-                    return Cesium.Color.clone(color, pk.col).withAlpha(a * edge);
+            polyline: {
+                positions: new Cesium.CallbackProperty(() => {
+                    const src = cm._sampleNode(srcId);
+                    const tgt = cm._sampleNode(tgtId);
+                    if (!src || !tgt) return [];
+                    return [src, tgt];
                 }, false),
-                scale: new Cesium.CallbackProperty(() => {
-                    const now = (typeof performance !== 'undefined')
-                        ? performance.now() : Date.now();
-                    const ph = (now * speed + phase0) % 1;
-                    return baseScale * (0.8 + 0.45 * (0.5 + 0.5 * Math.sin(ph * Math.PI * 2)));
-                }, false),
-                width: 22,
-                height: 22,
-                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                width: new Cesium.CallbackProperty(
+                    () => this._currentWidth, false),
+                material: prop,
+                clampToGround: false,
             },
             properties: {
-                type: 'packet',
+                type: 'packet',   // decorative — excluded from picking
                 linkId: linkId,
             },
         });
 
-        this._all.push(entity);
-        return entity;
+        this._byLink.set(linkId, { srcId, tgtId, count, entity, prop });
     }
 
-    /** Remove all packet entities for one link record (does not delete map). */
-    _removeLinkPackets(rec) {
-        for (const ent of rec.packets) {
-            this.cm.viewer.entities.remove(ent);
-            const idx = this._all.indexOf(ent);
-            if (idx !== -1) this._all.splice(idx, 1);
+    /** Remove one link's overlay entity. */
+    _removeOverlay(rec) {
+        if (rec.entity) {
+            this.cm.viewer.entities.remove(rec.entity);
+            rec.entity = null;
         }
-        rec.packets = [];
     }
 
-    /** Remove every packet entity and reset all state. */
+    /** Remove every overlay entity and reset all state. */
     _removeAll() {
-        for (const ent of this._all) {
-            this.cm.viewer.entities.remove(ent);
+        for (const rec of this._byLink.values()) {
+            this._removeOverlay(rec);
         }
-        this._all = [];
         this._byLink.clear();
+    }
+
+    /** Per-frame update: zoom-linked width + advance every bulge's phase. */
+    _animate() {
+        this._currentWidth = this._pulseWidth();
+        if (!this._byLink.size) return;
+        const now = (typeof performance !== 'undefined'
+            ? performance.now() : Date.now()) / 1000;
+        for (const rec of this._byLink.values()) {
+            rec.prop.tick(now, this.dimAlpha);
+        }
     }
 }
 

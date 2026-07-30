@@ -320,21 +320,21 @@ class CesiumManager {
         const handler = new Cesium.ScreenSpaceEventHandler(this.scene.canvas);
 
         handler.setInputAction((click) => {
-            const picked = this.scene.pick(click.position);
-            if (picked && picked.id) {
-                // Packet entities are decorative — never select them. Treat a
-                // packet hit as empty space so it doesn't block link/node picks.
-                const ptype = picked.id.properties && picked.id.properties.type
-                    ? picked.id.properties.type.getValue()
+            // Drill through the decorative layers (traffic pulse overlays,
+            // ISL mesh) — they are wider than / coincident with the link line
+            // and must not block link/node selection.
+            const hits = this.scene.drillPick(click.position);
+            let target = null;
+            for (const h of hits) {
+                if (!h || !h.id) continue;
+                const ptype = h.id.properties && h.id.properties.type
+                    ? h.id.properties.type.getValue()
                     : null;
-                if (ptype === 'packet' || ptype === 'isl_mesh') {
-                    this.selectEntity(null);
-                } else {
-                    this.selectEntity(picked.id);
-                }
-            } else {
-                this.selectEntity(null);
+                if (ptype === 'packet' || ptype === 'isl_mesh') continue;
+                target = h.id;
+                break;
             }
+            this.selectEntity(target);
         }, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
         handler.setInputAction(() => {
@@ -1189,6 +1189,14 @@ class CesiumManager {
                 this.clearRouteHighlights();
             }, holdSeconds * 1000);
         }
+
+        // Let the packet-flow layer react: the path's links shed their traffic
+        // bulges (they already wear moving dashes) and the remaining
+        // background pulses dim so this route stands out.
+        if (this.packetFlow && this._highlightedLinks.size) {
+            this.packetFlow.dimAlpha = 0.3;
+            this.packetFlow.sync();
+        }
     }
 
     /** Advance the dash phase of every active moving-dash material (preRender). */
@@ -1234,6 +1242,13 @@ class CesiumManager {
         }
         this._highlightedLinks.clear();
         this._movingDashes.clear();
+
+        // Restore the packet-flow layer: background pulses return to full
+        // brightness and the released path links regain their traffic bulges.
+        if (this.packetFlow) {
+            this.packetFlow.dimAlpha = 1.0;
+            this.packetFlow.sync();
+        }
     }
 
     // ======================================================================
