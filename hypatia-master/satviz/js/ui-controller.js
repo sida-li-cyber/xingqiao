@@ -523,6 +523,18 @@ class UIController {
         const send = document.getElementById('fileSendBtn');
         if (send) send.addEventListener('click', () => this.onFileSend());
 
+        // Milestone C: satellite locate (pick a satellite by number quickly).
+        const loc = document.getElementById('satLocate');
+        if (loc) {
+            loc.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); this.locateSatellite('fileSrc'); }
+            });
+        }
+        const toSrc = document.getElementById('satToSrc');
+        if (toSrc) toSrc.addEventListener('click', () => this.locateSatellite('fileSrc'));
+        const toDst = document.getElementById('satToDst');
+        if (toDst) toDst.addEventListener('click', () => this.locateSatellite('fileDst'));
+
         // Event delegation for per-card buttons (cancel / download) and select.
         const list = document.getElementById('fileList');
         if (list) {
@@ -546,38 +558,107 @@ class UIController {
         }
     }
 
-    /** Fill the source / destination selects from the simulation node set. */
+    /** Fill the source / destination selects from the simulation node set.
+     *  Milestone C: every terminal type (satellite / uav / ship / ground_station)
+     *  may act as both source and destination. Nodes are grouped into <optgroup>
+     *  blocks by type; satellites are sorted by (shell, plane, index) and given a
+     *  stable global running number (shown in the label) that the 卫星定位 box can
+     *  use to jump straight to a satellite. */
     populateFileNodes() {
         const meta = (this.app && this.app.nodeMetadata) || {};
-        const srcs = [];
-        const dsts = [];
+        const groups = { satellite: [], uav: [], ship: [], ground_station: [] };
         for (const [id, m] of Object.entries(meta)) {
-            if (m.type === 'uav' || m.type === 'ship') srcs.push([id, m.label || id]);
-            if (m.type === 'ground_station') dsts.push([id, m.label || id]);
+            if (groups[m.type]) groups[m.type].push([id, m]);
         }
-        const fill = (selId, items, fallback) => {
-            const sel = document.getElementById(selId);
+        // Sort satellites so the global numbering is stable and follows the
+        // orbital layout (shell -> plane -> index).
+        groups.satellite.sort((a, b) => {
+            const oa = a[1].orbit || {}, ob = b[1].orbit || {};
+            return ((oa.shell || 0) - (ob.shell || 0)) ||
+                   ((oa.plane || 0) - (ob.plane || 0)) ||
+                   ((oa.index || 0) - (ob.index || 0));
+        });
+        // Ordered satellite ids for the numeric locate feature.
+        this._satList = groups.satellite.map(([id]) => id);
+
+        const typeLabels = { satellite: '卫星', uav: '无人机', ship: '船舶', ground_station: '地面站' };
+        const order = ['satellite', 'uav', 'ship', 'ground_station'];
+        const build = (sel) => {
             if (!sel) return;
             sel.innerHTML = '';
-            if (!items.length) {
-                const o = document.createElement('option');
-                o.value = fallback; o.textContent = fallback;
-                sel.appendChild(o);
-                return;
-            }
-            for (const [val, lbl] of items) {
-                const o = document.createElement('option');
-                o.value = val; o.textContent = `${lbl} (${val})`;
-                sel.appendChild(o);
+            let satNum = 0;
+            for (const t of order) {
+                const og = document.createElement('optgroup');
+                og.label = typeLabels[t];
+                for (const [id, m] of groups[t]) {
+                    const o = document.createElement('option');
+                    o.value = id;
+                    if (t === 'satellite') {
+                        satNum += 1;
+                        o.textContent = '#' + String(satNum).padStart(4, '0') + ' ' + id;
+                    } else {
+                        o.textContent = m.label || id;
+                    }
+                    og.appendChild(o);
+                }
+                sel.appendChild(og);
             }
         };
-        fill('fileSrc', srcs, 'UAV-01');
-        fill('fileDst', dsts, 'Beijing');
+        build(document.getElementById('fileSrc'));
+        build(document.getElementById('fileDst'));
         // Sensible defaults
         const src = document.getElementById('fileSrc');
         if (src && src.querySelector('option[value="UAV-01"]')) src.value = 'UAV-01';
         const dst = document.getElementById('fileDst');
         if (dst && dst.querySelector('option[value="Beijing"]')) dst.value = 'Beijing';
+    }
+
+    /** Resolve a satellite id from a numeric query. Accepts a global running
+     *  number ("123" -> the 123rd satellite in sorted order) or a plane/index
+     *  pair ("5-3" -> Sat-5-3), optionally prefixed with a shell for multi-shell
+     *  constellations ("0-5-3"). Returns the node id, or null if not found. */
+    findSatelliteByNumber(query) {
+        const meta = (this.app && this.app.nodeMetadata) || {};
+        const list = this._satList || [];
+        const q = String(query == null ? '' : query).trim()
+            .toLowerCase().replace(/^sat[-_\s]?/, '');
+        if (!q) return null;
+        const parts = q.split(/[-_\s,]+/).filter(Boolean).map(Number);
+        if (parts.length >= 2 && parts.every(Number.isInteger)) {
+            for (const id of list) {
+                const o = (meta[id] && meta[id].orbit) || {};
+                if (parts.length >= 3) {
+                    if (o.shell === parts[0] && o.plane === parts[1] && o.index === parts[2]) return id;
+                } else if (o.plane === parts[0] && o.index === parts[1]) {
+                    return id;
+                }
+            }
+            return null;
+        }
+        if (/^\d+$/.test(q)) {
+            const n = parseInt(q, 10);
+            if (n >= 1 && n <= list.length) return list[n - 1];
+        }
+        return null;
+    }
+
+    /** Read the 卫星定位 input and assign the matched satellite to the given
+     *  select ('fileSrc' or 'fileDst'). Flashes the input green on a match and
+     *  red when nothing is found. */
+    locateSatellite(targetSelId) {
+        const input = document.getElementById('satLocate');
+        const sel = document.getElementById(targetSelId);
+        if (!input || !sel) return;
+        const id = this.findSatelliteByNumber(input.value);
+        input.classList.remove('loc-ok', 'loc-bad');
+        if (id && sel.querySelector('option[value="' + id + '"]')) {
+            sel.value = id;
+            input.classList.add('loc-ok');
+        } else {
+            input.classList.add('loc-bad');
+        }
+        clearTimeout(this._locTimer);
+        this._locTimer = setTimeout(() => input.classList.remove('loc-ok', 'loc-bad'), 1200);
     }
 
     _updateSendBtn() {
