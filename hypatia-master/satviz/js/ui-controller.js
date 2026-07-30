@@ -725,6 +725,7 @@ class UIController {
             console.error('[UI] file upload/send failed:', err);
             alert('上传失败：' + err.message + '\n（确认后端 realtime_backend 已启动）');
             btn.disabled = false;
+        } finally {
             btn.textContent = oldLabel;
         }
     }
