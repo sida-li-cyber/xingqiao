@@ -24,6 +24,7 @@ import math
 import time
 import random
 import sys
+from datetime import datetime, timezone
 
 try:
     import websockets
@@ -34,6 +35,20 @@ except ImportError:
 
 # Protocol v3 Phase 2: packet-level discrete-event simulation engine
 from packet_sim import PacketEngine, PRIO_HIGH, PRIO_BEST_EFFORT
+
+# Phase 8 (v3): pluggable ephemeris providers (circular / SGP4) and TLE
+# tooling, copied verbatim from the v4 research codebase. CircularProvider
+# reproduces the previous inline Keplerian math exactly, so the default
+# mode stays regression-identical.
+from ephemeris import (
+    CircularProvider, SGP4Provider, attach_synthetic_sgp4,
+    load_tle_file, satrec_nominal_altitude_km,
+)
+# 教学实验沙箱（改进 #2 / 阶段 C）：独立 PacketEngine，与主仿真互不干扰
+from experiments import (
+    experiment_catalog, run_experiment,
+    ExperimentCancelled, ExperimentNotFound,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -233,13 +248,22 @@ def propagation_delay_ms(lat1, lon1, alt1_m, lat2, lon2, alt2_m):
 # ---------------------------------------------------------------------------
 
 class Satellite:
-    """Circular orbit propagation (unchanged from v1)."""
+    """A constellation satellite delegating propagation to an ephemeris
+    provider (Phase 8 / v4).
+
+    The default provider is CircularProvider — the v1-v3 Keplerian
+    circular-orbit model, byte-identical to the old inline math. SGP4 mode
+    (real or synthetic TLE) swaps in an SGP4Provider; nothing else in the
+    core changes, since every consumer only calls get_position(t).
+    """
 
     def __init__(self, sat_id, altitude_km, inclination_deg, raan_deg,
-                 mean_anomaly_deg, shell=0, plane=0, idx=0):
+                 mean_anomaly_deg, shell=0, plane=0, idx=0, provider=None):
         self.id = sat_id
         # Structured constellation coordinates (Phase 7): topology is built
-        # from these instead of parsing the ID string.
+        # from these instead of parsing the ID string. Satellites loaded
+        # from a real TLE file carry -1 (unknown structure) and fall back
+        # to geometric nearest-neighbour ISL.
         self.shell = shell
         self.plane = plane
         self.idx = idx
@@ -248,27 +272,20 @@ class Satellite:
         self.raan_rad = math.radians(raan_deg)
         self.mean_anomaly_rad = math.radians(mean_anomaly_deg)
 
+        # Phase 8: pluggable propagation backend.
+        if provider is None:
+            provider = CircularProvider(
+                altitude_km, self.inclination_rad, self.raan_rad,
+                self.mean_anomaly_rad)
+        self.provider = provider
+
         r = EARTH_RADIUS_KM + altitude_km
         self.period = 2.0 * math.pi * math.sqrt(r ** 3 / EARTH_MU)
         self.angular_velocity = 2.0 * math.pi / self.period
 
     def get_position(self, t):
         """Return (lat_deg, lon_deg, alt_m) at simulation time t."""
-        M = self.mean_anomaly_rad + self.angular_velocity * t
-        theta = M % (2.0 * math.pi)
-
-        lat_rad = math.asin(math.sin(self.inclination_rad) * math.sin(theta))
-        lat = math.degrees(lat_rad)
-
-        lon_offset = math.atan2(
-            math.cos(self.inclination_rad) * math.sin(theta),
-            math.cos(theta)
-        )
-        lon = math.degrees(self.raan_rad + lon_offset)
-        lon -= EARTH_ROTATION_RATE * t
-        lon = normalize_lon(lon)
-
-        return lat, lon, self.altitude_km * 1000.0  # meters
+        return self.provider.get_position(t)
 
 
 def create_constellation(num_orbits=6, sats_per_orbit=12,
@@ -329,6 +346,47 @@ def create_constellation(num_orbits=6, sats_per_orbit=12,
                     sat_id, alt, inc, raan, ma,
                     shell=sh, plane=plane, idx=idx,
                 ))
+    return satellites
+
+
+def satellites_from_tle_records(records, t0_jd=None):
+    """Build satellites from parsed (name, Satrec) pairs (shared builder).
+
+    ``t0_jd`` shifts the simulation time origin away from each TLE's own
+    epoch so every satellite shares one reference instant.
+    """
+    satellites = []
+    for name, satrec in records:
+        sat_id = f"Sat-{name}"
+        alt_km = satrec_nominal_altitude_km(satrec)
+        inc_deg = math.degrees(satrec.inclo)
+        # RAAN / mean anomaly at epoch (deg) — kept for reference only;
+        # propagation is fully owned by the SGP4 provider.
+        raan_deg = math.degrees(satrec.nodeo)
+        ma_deg = math.degrees(satrec.mo)
+        satellites.append(Satellite(
+            sat_id, alt_km, inc_deg, raan_deg, ma_deg,
+            shell=-1, plane=-1, idx=-1,
+            provider=SGP4Provider(satrec, t0_jd=t0_jd),
+        ))
+    return satellites
+
+
+def create_constellation_from_tle(tle_path, t0_jd=None):
+    """Create satellites from a real TLE file (Phase 8 / v4).
+
+    Each satellite is propagated by SGP4 from its own TLE. IDs keep the
+    "Sat-" prefix so every prefix-based filter in the core and frontend
+    keeps working: "Sat-{TLE name}" (e.g. "Sat-STARLINK-3041").
+
+    shell/plane/idx are set to -1 (unknown structure for a real catalog),
+    which makes DemoSimCore fall back to geometric nearest-neighbour ISL
+    instead of the structured plane/index adjacency.
+    """
+    satellites = satellites_from_tle_records(load_tle_file(tle_path),
+                                             t0_jd=t0_jd)
+    if not satellites:
+        raise ValueError(f"No TLE entries parsed from {tle_path}")
     return satellites
 
 
@@ -542,33 +600,70 @@ class DemoSimCore:
 
     def __init__(self, host="localhost", port=8000, num_orbits=6,
                  sats_per_orbit=12, num_uavs=8, num_ships=10,
-                 scale=None):
+                 scale=None, ephemeris="circular", tle_file=None,
+                 epoch=None):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
 
-        # Phase 7: --scale picks a preset shell list; otherwise the legacy
-        # single-shell generator (identical geometry to v3) is used.
-        if scale is not None:
-            if scale not in SCALE_PRESETS:
-                raise ValueError(
-                    f"Unknown scale preset {scale}; "
-                    f"choose from {sorted(SCALE_PRESETS)}")
-            self._shells = [dict(SCALE_PRESETS[scale])]
-            self.scale = scale
-        else:
-            self._shells = None
-            self.scale = num_orbits * sats_per_orbit
+        # Phase 8 (v4): propagation backend selection.
+        #   ephemeris="circular"          -- v3 Keplerian model (default,
+        #                                    byte-identical regression base)
+        #   ephemeris="sgp4" (no tle_file) -- synthetic TLE generated from
+        #                                    the Walker elements; structured
+        #                                    ISL stays valid
+        #   tle_file=<path>               -- real TLE catalog; satellites are
+        #                                    unstructured -> geometric ISL
+        self.ephemeris_mode = "sgp4" if tle_file else ephemeris
+        self.tle_source = tle_file if tle_file else (
+            "synthetic" if ephemeris == "sgp4" else None)
+        self.sim_epoch = epoch if epoch is not None else datetime.now(
+            timezone.utc)
 
-        # Create entities
-        self.satellites = create_constellation(
-            num_orbits, sats_per_orbit, shells=self._shells)
+        if tle_file:
+            # Real TLE catalog overrides the Walker generator entirely.
+            self._shells = None
+            self.satellites = create_constellation_from_tle(tle_file)
+            self.scale = len(self.satellites)
+        else:
+            # Phase 7: --scale picks a preset shell list; otherwise the
+            # legacy single-shell generator (identical geometry to v3).
+            if scale is not None:
+                if scale not in SCALE_PRESETS:
+                    raise ValueError(
+                        f"Unknown scale preset {scale}; "
+                        f"choose from {sorted(SCALE_PRESETS)}")
+                self._shells = [dict(SCALE_PRESETS[scale])]
+                self.scale = scale
+            else:
+                self._shells = None
+                self.scale = num_orbits * sats_per_orbit
+
+            # Create entities
+            self.satellites = create_constellation(
+                num_orbits, sats_per_orbit, shells=self._shells)
+            if ephemeris == "sgp4":
+                attach_synthetic_sgp4(self.satellites, self.sim_epoch)
+
         self.uavs = create_uav_formation(num_uavs)
         self.ships = create_ships(num_ships)
         self.ground_stations = GROUND_STATIONS
 
-        # Pre-compute static ISL topology
-        self.isl_links = self._compute_isl_topology()
+        # ISL topology: structured plane/index adjacency for Walker shells;
+        # geometric nearest-neighbour for unstructured (real TLE) catalogs,
+        # recomputed periodically as the true geometry drifts.
+        self._isl_geometric = any(s.shell < 0 for s in self.satellites)
+        if self._isl_geometric:
+            init_pos = {}
+            for sat in self.satellites:
+                lat, lon, alt = sat.get_position(0.0)
+                init_pos[sat.id] = {"lat": lat, "lon": lon, "alt": alt}
+            self.isl_links = self._compute_geometric_isl(init_pos)
+            self.isl_recompute_interval = 60.0
+        else:
+            self.isl_links = self._compute_isl_topology()
+            self.isl_recompute_interval = None
+        self._last_isl_recompute = 0.0
 
         # Dynamic link state (with hysteresis)
         self._active_gsl = set()
@@ -608,6 +703,12 @@ class DemoSimCore:
         self._tick_count = 0
         self.links_full_every = 25
 
+        # 教学实验沙箱状态：同一时刻只跑一个实验；结果经 outbox 在
+        # 主循环里随 5 Hz tick 广播（experiment_update 帧）。
+        self._experiment_task = None
+        self._experiment_cancel = False
+        self._experiment_outbox = []
+
     # ------------------------------------------------------------------
     # ISL topology (static)
     # ------------------------------------------------------------------
@@ -645,6 +746,44 @@ class DemoSimCore:
                     links.append((sats_a[i].id, sats_b[i].id))
 
         return links
+
+    def _compute_geometric_isl(self, positions, k=4, max_range_km=6000.0):
+        """K-nearest-neighbour ISL for unstructured constellations.
+
+        Real TLE catalogs have no clean (plane, idx) structure, so links
+        are formed by spatial proximity instead — the same principle as
+        Starlink's dynamic laser crosslinks. Each satellite selects its k
+        nearest neighbours within max_range_km (a realistic optical
+        crosslink range); the pair set is symmetrised so every selected
+        neighbour yields one undirected link.
+
+        Reuses the Phase-7 10-degree spatial grid with a wide margin
+        (+/-50 deg of latitude/longitude, comfortably beyond the 6000 km
+        range cap at LEO altitude) so the search stays O(N * m) instead of
+        O(N^2). Returns the same (a, b) tuple list as the structured
+        builder; downstream (propagation cache, engine sync, init frame)
+        is topology-source agnostic.
+        """
+        sat_pos = {sid: p for sid, p in positions.items()
+                   if sid.startswith("Sat-")}
+        grid = build_sat_grid(sat_pos)
+
+        pairs = set()
+        for sid, p in sat_pos.items():
+            cands = grid_candidates(grid, p["lat"], p["lon"], margin=5)
+            ranked = []
+            for cid in cands:
+                if cid == sid:
+                    continue
+                cp = sat_pos[cid]
+                d = haversine_km(p["lat"], p["lon"],
+                                 cp["lat"], cp["lon"])
+                if d <= max_range_km:
+                    ranked.append((d, cid))
+            ranked.sort()
+            for _d, cid in ranked[:k]:
+                pairs.add((sid, cid) if sid < cid else (cid, sid))
+        return sorted(pairs)
 
     # ------------------------------------------------------------------
     # Dynamic link computation
@@ -935,6 +1074,18 @@ class DemoSimCore:
                 # is announced once here so clients can draw it up front.
                 "sat_order": [s.id for s in self.satellites],
                 "isl_topology": [list(pair) for pair in self.isl_links],
+                # Phase 8 (v3): propagation backend metadata (additive;
+                # display altitude stays the constant shell value while the
+                # sim internally uses full SGP4 geometry).
+                "ephemeris": {
+                    "mode": self.ephemeris_mode,
+                    "source": self.tle_source,
+                    "epoch": self.sim_epoch.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "isl": "geometric" if self._isl_geometric
+                           else "structured",
+                },
+                # 教学实验目录（改进 #2）：前端据此渲染实验卡片
+                "experiments": experiment_catalog(),
                 "link_types": {
                     "isl": {"label": "星间链路", "color": "#4FC3F7",
                             "capacity_bps": LINK_CAPACITY_BPS["isl"]},
@@ -1005,6 +1156,15 @@ class DemoSimCore:
         if (self.sim_time < self._last_link_update or
                 self.sim_time - self._last_link_update >=
                 self.link_update_interval):
+            # Phase 8: geometric ISL (real TLE mode) drifts with the true
+            # orbital geometry, so it is recomputed periodically; the diff
+            # propagates through packet_sim's existing handover-drop path.
+            if (self._isl_geometric and
+                    (self.sim_time < self._last_isl_recompute or
+                     self.sim_time - self._last_isl_recompute >=
+                     self.isl_recompute_interval)):
+                self.isl_links = self._compute_geometric_isl(positions)
+                self._last_isl_recompute = self.sim_time
             self._update_dynamic_links(positions)
             self._refresh_isl_prop(positions)
             self._sync_engine_topology(positions)
@@ -1186,6 +1346,65 @@ class DemoSimCore:
             if file_id:
                 self.engine.cancel_file(file_id)
                 print(f"  [file] cancelled: {file_id}")
+        elif action == "experiment_run":
+            # 教学实验（改进 #2）：在独立沙箱引擎中运行，主仿真不受影响。
+            exp_id = str(params.get("exp_id", ""))
+            run_params = params.get("params") or {}
+            if self._experiment_task and not self._experiment_task.done():
+                self._experiment_outbox.append({
+                    "message_type": "experiment_update",
+                    "payload": {"exp_id": exp_id, "status": "error",
+                                "error": "experiment_busy"},
+                })
+                print(f"  [experiment] busy, rejected: {exp_id}")
+                return
+            self._experiment_cancel = False
+            self._experiment_task = asyncio.get_event_loop().create_task(
+                self._experiment_loop(exp_id, run_params))
+            print(f"  [experiment] run: {exp_id} params={run_params}")
+        elif action == "experiment_cancel":
+            self._experiment_cancel = True
+            print("  [experiment] cancel requested")
+
+    async def _experiment_loop(self, exp_id, run_params=None):
+        """运行一个教学实验并把进度/结果推入 outbox（主循环转发）。"""
+        def on_progress(update):
+            self._experiment_outbox.append({
+                "message_type": "experiment_update",
+                "payload": {"exp_id": exp_id, "status": "running", **update},
+            })
+
+        try:
+            result = await run_experiment(
+                exp_id, run_params=run_params, on_progress=on_progress,
+                cancel_check=lambda: self._experiment_cancel)
+            self._experiment_outbox.append({
+                "message_type": "experiment_update",
+                "payload": {"exp_id": exp_id, "status": "done",
+                            "result": result},
+            })
+            print(f"  [experiment] done: {exp_id} "
+                  f"({'PASS' if result['all_pass'] else 'FAIL'})")
+        except ExperimentCancelled:
+            self._experiment_outbox.append({
+                "message_type": "experiment_update",
+                "payload": {"exp_id": exp_id, "status": "cancelled"},
+            })
+            print(f"  [experiment] cancelled: {exp_id}")
+        except ExperimentNotFound as exc:
+            self._experiment_outbox.append({
+                "message_type": "experiment_update",
+                "payload": {"exp_id": exp_id, "status": "error",
+                            "error": f"unknown experiment: {exc}"},
+            })
+            print(f"  [experiment] unknown: {exp_id}")
+        except Exception as exc:                    # noqa: BLE001
+            self._experiment_outbox.append({
+                "message_type": "experiment_update",
+                "payload": {"exp_id": exp_id, "status": "error",
+                            "error": repr(exc)},
+            })
+            print(f"  [experiment] error: {exc!r}")
 
     # ------------------------------------------------------------------
     # Main loop
@@ -1206,6 +1425,9 @@ class DemoSimCore:
         print(f"  Ground Stations: {num_gs}")
         print(f"  ISL links:       {len(self.isl_links)}")
         print(f"  Scale preset:    {self.scale}")
+        print(f"  Ephemeris:       {self.ephemeris_mode}"
+              + (f" ({self.tle_source})" if self.tle_source else ""))
+        print(f"  Epoch (UTC):     {self.sim_epoch.strftime('%Y-%m-%dT%H:%M:%SZ')}")
         print(f"  Duration:        {self.duration}s")
         print(f"  Protocol:        v3")
         print(f"{'='*55}\n")
@@ -1265,6 +1487,10 @@ class DemoSimCore:
                                     "events": file_events,
                                 }))
                             await ws.send(json.dumps(state_msg))
+                            # 教学实验进度/结果帧（如有）
+                            while self._experiment_outbox:
+                                await ws.send(json.dumps(
+                                    self._experiment_outbox.pop(0)))
                         except websockets.exceptions.ConnectionClosed:
                             print("\nSend failed, connection lost - reconnecting...")
                             self.running = False
@@ -1315,7 +1541,39 @@ async def main():
                         help="Number of UAVs")
     parser.add_argument("--num-ships", type=int, default=10,
                         help="Number of ships")
+    parser.add_argument("--ephemeris", choices=["circular", "sgp4"],
+                        default="circular",
+                        help="Propagation model: circular (v3 regression "
+                             "baseline) or sgp4 (synthetic TLE generated "
+                             "from the Walker elements)")
+    parser.add_argument("--tle", default=None, metavar="SRC",
+                        help="Real TLE source; implies SGP4 + geometric ISL "
+                             "and overrides --scale. Forms: a local file "
+                             "path; 'celestrak:<GROUP>' (fetched from the "
+                             "Celestrak GP API, cached, offline fallback to "
+                             "data/starlink_sample.tle); 'url:<URL>'")
+    parser.add_argument("--epoch", default=None, metavar="ISO8601",
+                        help="Simulation start UTC, e.g. "
+                             "2026-01-01T00:00:00 (default: current time)")
     args = parser.parse_args()
+
+    # celestrak:/url: TLE specs resolve to a local file (cached, with
+    # offline fallback). Plain paths pass through unchanged.
+    tle_file = args.tle
+    if tle_file and (tle_file.startswith("celestrak:")
+                     or tle_file.startswith("url:")):
+        from tle_source import resolve_tle
+        tle_file = resolve_tle(tle_file)
+
+    epoch = None
+    if args.epoch:
+        try:
+            epoch = datetime.fromisoformat(
+                args.epoch.replace("Z", "+00:00"))
+        except ValueError as exc:
+            parser.error(f"invalid --epoch: {exc}")
+        if epoch.tzinfo is None:
+            epoch = epoch.replace(tzinfo=timezone.utc)
 
     core = DemoSimCore(
         host=args.host,
@@ -1325,6 +1583,9 @@ async def main():
         num_uavs=args.num_uavs,
         num_ships=args.num_ships,
         scale=args.scale,
+        ephemeris=args.ephemeris,
+        tle_file=tle_file,
+        epoch=epoch,
     )
     await core.run()
 

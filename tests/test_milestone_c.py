@@ -42,6 +42,11 @@ import websockets
 BASE = "http://127.0.0.1:8000"
 WSURL = "ws://127.0.0.1:8000/ws/client"
 
+# 本机回环地址必须绕过系统代理（Windows 注册表代理会让 requests
+# 对 127.0.0.1 返回 502，而 WS 库不走代理所以一直正常）。
+http = requests.Session()
+http.trust_env = False
+
 # (src, dst, size_bytes) — covers every terminal type as both src and dst,
 # with several moving destinations.
 CASES = [
@@ -61,7 +66,7 @@ PER_CASE_TIMEOUT = 150.0
 # ---------------------------------------------------------------------------
 
 def upload(data: bytes, name: str) -> dict:
-    r = requests.post(BASE + "/api/files/upload",
+    r = http.post(BASE + "/api/files/upload",
                       files={"file": (name, data, "application/octet-stream")})
     r.raise_for_status()
     return r.json()
@@ -81,7 +86,7 @@ def poll_until_done(file_id: str, timeout: float = PER_CASE_TIMEOUT) -> dict:
     deadline = time.time() + timeout
     last = {}
     while time.time() < deadline:
-        last = requests.get(BASE + "/api/files/" + file_id).json()
+        last = http.get(BASE + "/api/files/" + file_id).json()
         if last.get("state") in ("COMPLETE", "CANCELLED", "FAILED"):
             return last
         time.sleep(2)
@@ -90,18 +95,18 @@ def poll_until_done(file_id: str, timeout: float = PER_CASE_TIMEOUT) -> dict:
 
 
 def download_matches(file_id: str, sha: str) -> bool:
-    dl = requests.get(BASE + "/api/files/%s/download" % file_id)
+    dl = http.get(BASE + "/api/files/%s/download" % file_id)
     return (dl.status_code == 200
             and hashlib.sha256(dl.content).hexdigest() == sha)
 
 
 def cleanup(file_id: str) -> None:
-    requests.delete(BASE + "/api/files/" + file_id)
+    http.delete(BASE + "/api/files/" + file_id)
 
 
 def check_stack() -> bool:
     try:
-        h = requests.get(BASE + "/health", timeout=5).json()
+        h = http.get(BASE + "/health", timeout=5).json()
         if h.get("cores_connected", 0) < 1:
             print("ERROR: no simulation core connected to backend")
             return False

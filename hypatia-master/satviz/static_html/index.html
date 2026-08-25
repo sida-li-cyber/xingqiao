@@ -413,6 +413,21 @@
         .file-card .fc-actions button.dl { background: rgba(52,211,153,0.16); color: var(--good); border-color: rgba(52,211,153,0.4); }
         .file-card .fc-actions button.cancel { color: var(--bad); }
 
+        /* ---------- Experiment lab entry (改进 #2，跳转 lab.html) ---------- */
+        #expBtn {
+            pointer-events: auto;
+            border: 1px solid rgba(56,189,248,0.55);
+            background: rgba(56,189,248,0.16);
+            color: var(--accent);
+            font-weight: 600;
+            border-radius: 999px;
+            padding: 7px 14px;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        #expBtn:hover { background: rgba(56,189,248,0.32); }
+
         /* ---------- Hint toast ---------- */
         #hintToast {
             position: absolute;
@@ -591,11 +606,12 @@
     <div id="hintToast">点击链路或节点查看实时状态 · 右键取消选择</div>
 
     <!-- JavaScript Modules -->
-    <script src="../js/websocket.js?v=3k4"></script>
-    <script src="../js/chart.js?v=3k4"></script>
-    <script src="../js/packet-flow.js?v=3k4"></script>
-    <script src="../js/cesium-manager.js?v=3k4"></script>
-    <script src="../js/ui-controller.js?v=3k4"></script>
-    <script src="../js/app.js?v=3k4"></script>
+    <script src="../js/websocket.js?v=3k7"></script>
+    <script src="../js/experiment.js?v=3k7"></script>
+    <script src="../js/chart.js?v=3k7"></script>
+    <script src="../js/packet-flow.js?v=3k7"></script>
+    <script src="../js/cesium-manager.js?v=3k7"></script>
+    <script src="../js/ui-controller.js?v=3k7"></script>
+    <script src="../js/app.js?v=3k7"></script>
 </body>
 </html>

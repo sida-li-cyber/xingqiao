@@ -218,6 +218,13 @@ bash hypatia_run_tests.sh
 
 ## 6. 运行
 
+### 6.0 一键启动（推荐，Windows）
+
+双击项目根目录的 **`start_starbridge.bat`**：自动创建/复用 `.venv`、安装依赖、
+依次拉起 后端(:8000) → 仿真核心 → 前端静态服务(:8080)，并打开浏览器
+<http://127.0.0.1:8080/static_html/index.html>。免 Cesium Token（自动使用
+离线底图）。停止：双击 `stop_starbridge.bat`。macOS/Linux 用 `start_starbridge.sh`。
+
 ### 6.1 快速启动（3 个终端）
 
 **终端 1：启动实时后端**
@@ -349,6 +356,47 @@ python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 50
 它自动完成 上传 → `file_send` → 实时进度 → 下载 → SHA-256 校验，末行打印 `[OK]` / `[FAIL]`。
 
 > 提示：若仿真已跑到 `duration` 上限自动暂停，`file_send` 会自动延长仿真时长并恢复播放，传输不会卡死；seek / stop / reset 等时间跳变会中断在途传输（后端标记为 `CANCELLED`）。详见 [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md)。
+
+### 6.9 教学实验（E1–E4，改进 #2）
+
+面向课堂的"理论 → 仿真 → 对账 → 报告"一体化实验台。点击页面右上角
+**「🧪 教学实验」** 打开面板，四张实验卡片：
+
+| 编号 | 实验 | 核心判据 |
+|---|---|---|
+| E1 | 时延分解与对账 | e2e = 21 ms 传播 + 0.037 ms 发送 ≈ 21.037 ms（±1 ms） |
+| E2 | M/D/1 排队模型 | Wq = ρs/2(1−ρ) = 12 ms，e2e ≈ 24 ms（±3 ms），ρ≈0.8 |
+| E3 | 链路切换丢包 | 尖峰 = 队列 200 + 在途 1 = 201 包（±1 包） |
+| E4 | QoS 严格优先级 | HIGH 时延/丢包 < BE，且 BE loss > 0 |
+
+每个实验在**独立沙箱引擎**（独立 `PacketEngine`）中运行，不干扰主星座
+仿真；固定随机种子（42/99/7/11），结果可复现。运行结束自动生成
+**理论-实测对账表**（逐行判定），可一键导出 **HTML 实验报告**
+（含参数表、对账表、结论、姓名学号栏，可直接打印为 PDF）。
+
+配套讲义：[docs/experiments/](docs/experiments/)（四份实验指导书 + 教师速查表）。
+协议：命令 `experiment_run` / `experiment_cancel`，推送帧 `experiment_update`
+（status: running / done / cancelled / error），实验目录随 `simulation_init.experiments` 下发。
+
+### 6.10 真实轨道（SGP4 / TLE，改进 #3）
+
+仿真核心默认使用与 v3 回归基线完全一致的圆轨道模型；切换到 SGP4 真实
+轨道传播只需给 `demo_sim_core.py` 加参数：
+
+```bash
+# 本地 TLE 文件（示例数据已内置）
+python demo_sim_core.py --tle data/starlink_sample.tle
+
+# 从 Celestrak 拉取最新 Starlink 星历（缓存，离线自动回退内置样例）
+python demo_sim_core.py --tle celestrak:starlink
+
+# 由 Walker 参数合成 SGP4（规模与 --scale 相同，仅换轨道模型）
+python demo_sim_core.py --ephemeris sgp4 --scale 1584
+```
+
+说明：`--tle` 隐含 SGP4 + 几何 ISL 拓扑，并覆盖 `--scale`（规模由 TLE 条数
+决定）；节点 ID 形如 `Sat-STARLINK-3041`。`--epoch` 可指定仿真起始 UTC。
+SGP4 模块（`ephemeris.py` / `tle_source.py`）复制自 V4，逻辑零改动。
 
 ---
 

@@ -65,7 +65,12 @@ class SatelliteVisualizationApp {
                 onAck: (payload) => this.handleAck(payload),
                 onError: (payload) => this.handleWSError(payload),
                 onMessage: (message) => this.handleWSMessage(message),
+                onExperimentUpdate: (payload) => this.handleExperimentUpdate(payload),
             });
+
+            // 教学实验面板（改进 #2）：E1~E4 沙箱实验 + 报告导出
+            this.experiments = new ExperimentLab(this.ws);
+            this.experiments.init();      // 立即渲染入口按钮（目录到达后自动填充）
 
             // Initialize UI Controller
             this.ui = new UIController(this.cesium, this.ws, this);
@@ -124,6 +129,11 @@ class SatelliteVisualizationApp {
         // Link type definitions (colors, labels)
         if (payload.link_types) {
             this.linkTypes = payload.link_types;
+        }
+
+        // 教学实验目录（E1~E4）
+        if (payload.experiments) {
+            this.experiments.setCatalog(payload.experiments);
         }
 
         // Protocol 3.1: compact state-frame support
@@ -433,6 +443,10 @@ class SatelliteVisualizationApp {
 
     handleWSMessage(message) {
         // Hook for future message types
+    }
+
+    handleExperimentUpdate(payload) {
+        if (this.experiments) this.experiments.handleUpdate(payload);
     }
 
     handleWSError(payload) {

@@ -25,3 +25,11 @@ hypatia-master/satviz/viz_output/
 
 # Backend file-transfer data plane (runtime uploads / reassembly)
 realtime_backend/data/
+
+# Runtime logs & temp diagnostics
+*.log
+starbridge_test_pids.txt
+ws_test.py
+
+# LibreOffice temp profile (PDF export)
+竞赛材料/.lo_profile/

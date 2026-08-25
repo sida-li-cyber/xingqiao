@@ -257,11 +257,19 @@ class CesiumManager {
         try {
             if (this.cesiumToken) {
                 Cesium.Ion.defaultAccessToken = this.cesiumToken;
+            } else {
+                // Token-free mode: skip the default Cesium Ion base layer entirely.
+                // The offline NaturalEarthII basemap added below needs no token.
+                console.log('[CesiumManager] No Cesium token configured - '
+                    + 'using token-free offline basemap (NaturalEarthII)');
             }
 
             this.viewer = new Cesium.Viewer(this.containerId, {
                 animation: false,
                 baseLayerPicker: false,
+                // Do not create the default Ion imagery layer: it requires an
+                // Ion access token. The custom basemap is added right below.
+                baseLayer: false,
                 fullscreenButton: true,
                 vrButton: false,
                 geocoder: false,

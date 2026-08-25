@@ -26,7 +26,15 @@ This repository is an enhanced fork of the [Hypatia](https://github.com/snkas/hy
 - [docs/phase6-validation.md](docs/phase6-validation.md) — 阶段 6 性能 / 正确性校验报告（对账理论值、压测、断线重连）
 - [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md) — 文件传输协议规范 v3.2（HTTP 数据面 + WS 命令 + `file_transfers` 遥测）
 - [docs/file-transfer-design.md](docs/file-transfer-design.md) — 自定义文件传输与实时追踪设计文档（控制面 / 数据面分离）
+- [docs/experiments/](docs/experiments/) — **教学实验指导书 E1–E4**（时延分解 / M/D/1 / 切换丢包 / QoS，含教师速查表）
+- [docs/education-upgrade-plan.md](docs/education-upgrade-plan.md) — 教育化升级计划（一键启动 / 教学实验 / SGP4 真实轨道）
 - [ROADMAP.md](ROADMAP.md) — 系统完善路线图（六阶段，已全部完成）
+
+## Quick Start (Windows)
+
+双击 `start_starbridge.bat` — 自动装依赖并拉起 后端 + 仿真核心 + 前端，
+浏览器打开 <http://127.0.0.1:8080/static_html/index.html>（免 Cesium Token）。
+停止用 `stop_starbridge.bat`。详细步骤见 [GUIDE.md §6](GUIDE.md)。
 
 ## Testing / Validation
 
@@ -43,6 +51,12 @@ python test_reconnect.py             # 断线重连健壮性（自动起停 back
 
 cd ../..                             # 回到项目根目录
 python tests/test_file_e2e.py        # 文件传输端到端：上传→传输→下载 SHA-256 一致 + 取消（自起 backend+core，端口 8769）
+python tests/test_orbit.py           # SGP4 轨道模型 O1–O7（复制自 V4 的模块与 V3 核心集成）
+python tests/test_experiments.py     # 教学实验 E1–E4：场景 + 理论对账 + 目录/取消（7 项，秒级）
+python tests/test_milestone_c.py     # 全终端文件传输集成（需运行中的栈：backend :8000 + core）
+
+# 或一次跑全部 pytest 单元/对账测试（无需起栈）：
+python -m pytest tests/ -q --ignore=tests/test_milestone_c.py
 ```
 
 **文件传输命令行客户端**（无需前端即可上传 / 传输 / 下载校验）：

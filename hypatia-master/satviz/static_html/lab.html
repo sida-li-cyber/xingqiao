@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星桥实验台 · 卫星网络虚拟仿真教学平台</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>✦</text></svg>">
+<style>
+:root {
+  --bg: #04060c;
+  --bg2: #0a1120;
+  --panel: rgba(13, 21, 38, 0.82);
+  --panel-solid: #0d1526;
+  --brd: rgba(120, 150, 190, 0.14);
+  --brd-hi: rgba(56, 189, 248, 0.45);
+  --brand: #38bdf8;
+  --brand-2: #818cf8;
+  --good: #34d399;
+  --warn: #fbbf24;
+  --bad: #f87171;
+  --text: #e6edf7;
+  --dim: #8fa3bd;
+  --faint: #56677e;
+  --radius: 14px;
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background:
+    radial-gradient(1100px 500px at 85% -10%, rgba(56, 189, 248, 0.10), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(129, 140, 248, 0.08), transparent 60%),
+    linear-gradient(180deg, var(--bg2), var(--bg) 40%);
+  color: var(--text);
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+#stars { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+#stars i {
+  position: absolute; width: 2px; height: 2px; border-radius: 50%;
+  background: #cfe6ff; opacity: 0.35;
+  animation: twinkle 4s ease-in-out infinite;
+}
+@keyframes twinkle { 50% { opacity: 0.08; } }
+
+/* ================= 顶栏 ================= */
+header {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 14px;
+  height: 64px; padding: 0 26px;
+  background: rgba(5, 9, 18, 0.82);
+  backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--brd);
+}
+.logo {
+  width: 34px; height: 34px; border-radius: 10px;
+  display: grid; place-items: center; font-size: 18px; color: #06121f;
+  background: linear-gradient(135deg, var(--brand), var(--brand-2));
+  box-shadow: 0 0 18px rgba(56, 189, 248, 0.4);
+}
+.brand-name { font-size: 16px; font-weight: 700; letter-spacing: 0.5px; }
+.brand-name em {
+  font-style: normal; font-size: 11px; font-weight: 500; color: var(--dim);
+  margin-left: 8px; letter-spacing: 2px;
+}
+.brand-sub {
+  font-size: 12px; color: var(--dim);
+  padding-left: 14px; border-left: 1px solid var(--brd);
+}
+.hd-right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+.conn { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--dim); }
+.conn .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--warn); box-shadow: 0 0 8px currentColor;
+  transition: background 0.3s;
+}
+.conn.on .dot { background: var(--good); animation: pulse 2s infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 12px var(--good); } }
+.back-link {
+  font-size: 12.5px; color: var(--dim); text-decoration: none;
+  padding: 7px 14px; border: 1px solid var(--brd); border-radius: 999px;
+  transition: all 0.2s;
+}
+.back-link:hover { color: var(--text); border-color: var(--brd-hi); }
+
+/* ================= 主体 ================= */
+main {
+  position: relative; z-index: 1;
+  display: grid; grid-template-columns: 292px 1fr;
+  gap: 18px; max-width: 1440px; margin: 0 auto;
+  padding: 20px 26px 40px;
+  align-items: start;
+}
+
+/* ---------- 左栏 ---------- */
+aside {
+  background: var(--panel); border: 1px solid var(--brd);
+  border-radius: var(--radius); padding: 16px;
+  backdrop-filter: blur(10px); box-shadow: var(--shadow);
+  position: sticky; top: 84px;
+}
+.side-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 2.5px;
+  color: var(--faint); margin-bottom: 12px; text-transform: uppercase;
+}
+.exp-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 11px 12px; border-radius: 11px; cursor: pointer;
+  border: 1px solid transparent; transition: all 0.18s;
+  margin-bottom: 4px;
+}
+.exp-item:hover { background: rgba(56, 189, 248, 0.06); }
+.exp-item.active {
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.14), rgba(129, 140, 248, 0.07));
+  border-color: var(--brd-hi);
+}
+.exp-item .code {
+  font-size: 12px; font-weight: 800; letter-spacing: 1px;
+  color: var(--brand); min-width: 26px;
+}
+.exp-item .nm { font-size: 13px; font-weight: 600; flex: 1; }
+.exp-item .st {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: rgba(143, 163, 189, 0.25); flex-shrink: 0;
+}
+.exp-item .st.pass { background: var(--good); box-shadow: 0 0 7px var(--good); }
+.exp-item .st.fail { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
+.ring-wrap {
+  display: flex; align-items: center; gap: 14px;
+  margin-top: 14px; padding: 13px 12px;
+  background: rgba(56, 189, 248, 0.05); border-radius: 11px;
+  border: 1px solid var(--brd);
+}
+.ring-wrap svg { transform: rotate(-90deg); }
+.ring-bg { stroke: rgba(143, 163, 189, 0.15); fill: none; }
+.ring-fg {
+  stroke: url(#ringGrad); fill: none; stroke-linecap: round;
+  transition: stroke-dashoffset 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ring-txt { display: flex; flex-direction: column; }
+.ring-txt b { font-size: 15px; }
+.ring-txt span { font-size: 11px; color: var(--dim); margin-top: 2px; }
+
+/* ---------- 主区 ---------- */
+#expMain {
+  display: flex; flex-direction: column; gap: 16px;
+  animation: rise 0.45s cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+@keyframes rise { from { opacity: 0; transform: translateY(14px); } }
+
+.hero {
+  background: var(--panel); border: 1px solid var(--brd);
+  border-radius: var(--radius); padding: 20px 24px;
+  backdrop-filter: blur(10px); box-shadow: var(--shadow);
+  position: relative; overflow: hidden;
+}
+.hero::before {
+  content: ''; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--brand), var(--brand-2), transparent);
+}
+.hero-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.hero .code {
+  font-size: 13px; font-weight: 800; letter-spacing: 1.5px;
+  padding: 4px 12px; border-radius: 8px;
+  background: rgba(56, 189, 248, 0.16); color: var(--brand);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+}
+.hero h1 { font-size: 20px; font-weight: 700; }
+.badge {
+  font-size: 11px; color: var(--dim); padding: 3px 10px;
+  border: 1px solid var(--brd); border-radius: 999px;
+}
+.hero .summary { margin-top: 9px; font-size: 13px; color: var(--dim); }
+.hero .note {
+  margin-top: 10px; font-size: 12.5px; color: var(--brand);
+  background: rgba(56, 189, 248, 0.07); border-left: 3px solid var(--brand);
+  padding: 7px 12px; border-radius: 0 8px 8px 0;
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+/* tabs */
+.tabs { display: flex; gap: 4px; }
+.tabs button {
+  flex: 1; padding: 10px; font-size: 13px; font-weight: 600;
+  background: transparent; color: var(--dim); border: none;
+  border-bottom: 2px solid transparent; cursor: pointer; transition: all 0.2s;
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.on { color: var(--brand); border-bottom-color: var(--brand); }
+.tab-body {
+  background: var(--panel); border: 1px solid var(--brd);
+  border-radius: var(--radius); padding: 18px 22px;
+  font-size: 13.5px; line-height: 1.8; color: var(--text);
+  min-height: 96px; backdrop-filter: blur(10px);
+}
+.tab-body .obj { font-size: 14px; }
+.tab-body pre {
+  font-family: 'Cascadia Code', Consolas, monospace; font-size: 12.5px;
+  color: #a8c7e8; white-space: pre-wrap; margin-top: 10px;
+}
+.tab-body ol { padding-left: 22px; }
+.tab-body ol li { margin: 4px 0; color: var(--dim); }
+.tab-body ol li::marker { color: var(--brand); font-weight: 700; }
+.tab-body .qa { margin: 8px 0; color: var(--dim); }
+.tab-body .qa b { color: var(--warn); font-weight: 600; }
+
+/* 工作区：输入 | 输出 */
+.work { display: grid; grid-template-columns: 5fr 6fr; gap: 16px; }
+.col {
+  background: var(--panel); border: 1px solid var(--brd);
+  border-radius: var(--radius); padding: 18px;
+  backdrop-filter: blur(10px); box-shadow: var(--shadow);
+}
+.col-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; font-weight: 700; letter-spacing: 2px;
+  color: var(--dim); margin-bottom: 14px; text-transform: uppercase;
+}
+.col-title::before {
+  content: ''; width: 6px; height: 6px; border-radius: 2px;
+  background: var(--brand); transform: rotate(45deg);
+}
+.col.out .col-title::before { background: var(--good); }
+
+/* 输入区 */
+.param { margin-bottom: 16px; }
+.param .p-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 7px;
+}
+.param .p-label { font-size: 13px; font-weight: 600; }
+.param .p-val {
+  margin-left: auto; font-size: 13px; font-weight: 700; color: var(--brand);
+  font-variant-numeric: tabular-nums;
+  padding: 1px 9px; border-radius: 6px;
+  background: rgba(56, 189, 248, 0.1);
+  transition: background 0.5s;
+}
+.param .p-val.flash { background: rgba(56, 189, 248, 0.35); }
+.param .p-unit { font-size: 11px; color: var(--faint); }
+.param input[type='range'] {
+  width: 100%; height: 5px; -webkit-appearance: none; appearance: none;
+  background: linear-gradient(90deg,
+    var(--brand) var(--fill, 50%), rgba(143, 163, 189, 0.18) var(--fill, 50%));
+  border-radius: 3px; outline: none; cursor: pointer;
+}
+.param input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; border: 3px solid var(--brand);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.5); cursor: grab;
+  transition: transform 0.15s;
+}
+.param input[type='range']::-webkit-slider-thumb:hover { transform: scale(1.2); }
+.param input[type='range']:disabled { opacity: 0.35; cursor: not-allowed; }
+.param .p-tip { font-size: 11px; color: var(--faint); margin-top: 5px; }
+
+.run-row { display: flex; gap: 10px; margin-top: 18px; }
+.btn {
+  border: none; border-radius: 10px; padding: 11px 22px;
+  font-size: 13.5px; font-weight: 700; cursor: pointer;
+  transition: all 0.2s; letter-spacing: 0.5px;
+}
+.btn-primary {
+  flex: 1; color: #04121f;
+  background: linear-gradient(135deg, var(--brand), #67d3fb);
+  box-shadow: 0 4px 16px rgba(56, 189, 248, 0.3);
+}
+.btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 22px rgba(56, 189, 248, 0.45); }
+.btn-primary:active { transform: translateY(0); }
+.btn-primary:disabled {
+  background: rgba(143, 163, 189, 0.2); color: var(--faint);
+  box-shadow: none; cursor: not-allowed; transform: none;
+}
+.btn-ghost {
+  color: var(--dim); background: rgba(143, 163, 189, 0.08);
+  border: 1px solid var(--brd);
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--brd-hi); }
+.btn-danger {
+  color: var(--bad); background: rgba(248, 113, 113, 0.1);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+/* 进度 */
+.prog-wrap { margin-top: 16px; display: none; }
+.prog-wrap.on { display: block; animation: rise 0.3s; }
+.prog-label {
+  display: flex; justify-content: space-between;
+  font-size: 12px; color: var(--brand); margin-bottom: 7px;
+}
+.prog-bar {
+  height: 7px; border-radius: 4px; overflow: hidden;
+  background: rgba(143, 163, 189, 0.12); position: relative;
+}
+.prog-bar > div {
+  height: 100%; border-radius: 4px; transition: width 0.4s ease;
+  background: linear-gradient(90deg, var(--brand), var(--good));
+  position: relative; overflow: hidden;
+}
+.prog-bar > div::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+  animation: shimmer 1.4s infinite;
+}
+@keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
+
+/* 输出区 */
+.theory-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.tcard {
+  padding: 12px 14px; border-radius: 11px;
+  background: rgba(56, 189, 248, 0.055); border: 1px solid var(--brd);
+  transition: border-color 0.3s;
+}
+.tcard .t-label { font-size: 11px; color: var(--dim); }
+.tcard .t-val {
+  font-size: 22px; font-weight: 800; margin-top: 3px;
+  font-variant-numeric: tabular-nums; transition: color 0.5s;
+}
+.tcard .t-val small { font-size: 12px; font-weight: 500; color: var(--dim); margin-left: 3px; }
+.tcard.flash { border-color: var(--brd-hi); }
+.tcard.flash .t-val { color: var(--brand); }
+.tcard .t-state {
+  display: inline-block; margin-top: 6px; font-size: 11px; font-weight: 700;
+  padding: 2px 10px; border-radius: 999px;
+}
+.t-state.cong { background: rgba(248,113,113,0.15); color: var(--bad); }
+.t-state.free { background: rgba(52,211,153,0.15); color: var(--good); }
+
+.verdict-wrap { margin-top: 16px; }
+.verdict-hint { text-align: center; color: var(--faint); font-size: 12.5px; padding: 26px 0; }
+table.vt { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.vt th {
+  text-align: left; color: var(--faint); font-weight: 600;
+  padding: 7px 9px; border-bottom: 1px solid var(--brd); white-space: nowrap;
+}
+table.vt td {
+  padding: 8px 9px; border-bottom: 1px solid rgba(120, 150, 190, 0.08);
+  font-variant-numeric: tabular-nums;
+}
+table.vt tr.pass-row td:first-child { color: var(--text); }
+table.vt .ok { color: var(--good); font-weight: 700; }
+table.vt .bad-t { color: var(--bad); font-weight: 700; }
+table.vt .fail-row { background: rgba(248, 113, 113, 0.05); }
+
+.concl {
+  margin-top: 14px; padding: 12px 15px; border-radius: 11px;
+  font-size: 13px; line-height: 1.7;
+  background: rgba(52, 211, 153, 0.06); border: 1px solid rgba(52, 211, 153, 0.25);
+}
+.concl.fail { background: rgba(248, 113, 113, 0.06); border-color: rgba(248, 113, 113, 0.3); }
+.concl b { display: inline-block; margin-bottom: 4px; }
+.out-actions { display: flex; gap: 10px; margin-top: 14px; }
+.out-actions .btn { flex: 1; }
+.btn-report {
+  color: var(--good); background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.35);
+}
+.btn-report:hover { background: rgba(52, 211, 153, 0.2); }
+
+/* 拓扑 */
+.topo-card {
+  background: var(--panel); border: 1px solid var(--brd);
+  border-radius: var(--radius); padding: 14px 18px 8px;
+  backdrop-filter: blur(10px);
+}
+.topo-title {
+  font-size: 11px; font-weight: 600; letter-spacing: 2px;
+  color: var(--faint); margin-bottom: 4px;
+}
+#topoSvg { width: 100%; height: 210px; display: block; }
+.topo-switch-note {
+  font-size: 11.5px; color: var(--warn); text-align: right;
+  padding: 2px 4px 8px; opacity: 0; transition: opacity 0.4s;
+}
+.topo-switch-note.on { opacity: 1; }
+
+/* toast */
+#toast {
+  position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%) translateY(20px);
+  padding: 12px 24px; border-radius: 12px; font-size: 13.5px; font-weight: 600;
+  background: rgba(13, 21, 38, 0.95); border: 1px solid var(--brd-hi);
+  box-shadow: var(--shadow); opacity: 0; pointer-events: none;
+  transition: all 0.35s cubic-bezier(0.2, 0.8, 0.3, 1); z-index: 50;
+}
+#toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* 加载占位 */
+.booting {
+  position: fixed; inset: 0; display: grid; place-items: center;
+  z-index: 30; background: rgba(4, 6, 12, 0.7); backdrop-filter: blur(6px);
+  flex-direction: column; gap: 14px; color: var(--dim); font-size: 14px;
+}
+.booting .spin {
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 3px solid rgba(56, 189, 248, 0.2); border-top-color: var(--brand);
+  animation: rot 0.9s linear infinite;
+}
+@keyframes rot { to { transform: rotate(360deg); } }
+
+@media (max-width: 1020px) {
+  main { grid-template-columns: 1fr; }
+  aside { position: static; }
+  .work { grid-template-columns: 1fr; }
+  .brand-sub { display: none; }
+}
+</style>
+</head>
+<body>
+<div id="stars"></div>
+
+<header>
+  <div class="logo">✦</div>
+  <div>
+    <div class="brand-name">星桥实验台<em>STARBRIDGE LAB</em></div>
+  </div>
+  <div class="brand-sub">卫星网络虚拟仿真教学平台</div>
+  <div class="hd-right">
+    <div class="conn" id="conn"><span class="dot"></span><span id="connTxt">连接核心中…</span></div>
+    <a class="back-link" href="index.html">← 返回演示模式</a>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <div class="side-title">实验列表</div>
+    <div id="expList"></div>
+    <div class="ring-wrap">
+      <svg width="64" height="64" viewBox="0 0 64 64">
+        <defs>
+          <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%" stop-color="#38bdf8"/><stop offset="100%" stop-color="#34d399"/>
+          </linearGradient>
+        </defs>
+        <circle class="ring-bg" cx="32" cy="32" r="26" stroke-width="6"/>
+        <circle class="ring-fg" id="ringFg" cx="32" cy="32" r="26" stroke-width="6"
+                stroke-dasharray="163.4" stroke-dashoffset="163.4"/>
+      </svg>
+      <div class="ring-txt">
+        <b id="ringPct">0%</b>
+        <span id="ringSub">0 / 4 实验</span>
+      </div>
+    </div>
+  </aside>
+
+  <section id="expMain">
+    <div class="hero">
+      <div class="hero-top">
+        <span class="code" id="hCode">—</span>
+        <h1 id="hName">等待实验目录…</h1>
+        <span class="badge" id="hDiff"></span>
+        <span class="badge" id="hMin"></span>
+      </div>
+      <div class="summary" id="hSummary"></div>
+      <div class="note" id="hNote"></div>
+    </div>
+
+    <div class="tabs" id="tabs">
+      <button data-tab="principle" class="on">实验原理</button>
+      <button data-tab="steps">实验步骤</button>
+      <button data-tab="qa">思考题</button>
+    </div>
+    <div class="tab-body" id="tabBody"></div>
+
+    <div class="work">
+      <div class="col in">
+        <div class="col-title">输入 · 实验参数</div>
+        <div id="paramList"></div>
+        <div class="run-row">
+          <button class="btn btn-primary" id="runBtn">▶ 运行实验</button>
+          <button class="btn btn-ghost" id="resetBtn">重置参数</button>
+        </div>
+        <div class="prog-wrap" id="progWrap">
+          <div class="prog-label">
+            <span id="progStage">准备中</span><span id="progPct">0%</span>
+          </div>
+          <div class="prog-bar"><div id="progFill" style="width:0%"></div></div>
+        </div>
+      </div>
+
+      <div class="col out">
+        <div class="col-title">输出 · 理论预览与对账</div>
+        <div class="theory-grid" id="theoryGrid"></div>
+        <div class="verdict-wrap" id="verdictWrap">
+          <div class="verdict-hint">运行实验后，这里将显示「理论值 vs 实测值」逐行对账表</div>
+        </div>
+        <div id="conclBox"></div>
+        <div class="out-actions" id="outActions" style="display:none">
+          <button class="btn btn-report" id="reportBtn">⬇ 下载实验报告</button>
+          <button class="btn btn-ghost" id="rerunBtn">重新运行</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="topo-card">
+      <div class="topo-title">实验拓扑 · SANDBOX TOPOLOGY</div>
+      <svg id="topoSvg" viewBox="0 0 820 210" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="topo-switch-note" id="topoSwitchNote"></div>
+    </div>
+  </section>
+</main>
+
+<div id="toast"></div>
+<div class="booting" id="booting"><div class="spin"></div><div>正在连接仿真核心，获取实验目录…</div></div>
+
+<script src="../js/websocket.js?v=3k7"></script>
+<script src="../js/lab.js?v=3k7"></script>
+</body>
+</html>

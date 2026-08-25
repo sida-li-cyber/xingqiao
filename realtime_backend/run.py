@@ -77,7 +77,10 @@ Examples:
         port=settings.port,
         log_level=settings.log_level,
         reload=settings.reload,
-        ws="websockets",
+        # "auto" lets modern uvicorn pick the maintained websockets
+        # implementation; the legacy ws="websockets" impl is deprecated and
+        # breaks handshakes on uvicorn>=0.5x (connection closed with 0 bytes).
+        ws="auto",
         ws_per_message_deflate=False,
         ws_ping_interval=10,
         ws_ping_timeout=5,

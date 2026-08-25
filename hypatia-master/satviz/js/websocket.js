@@ -23,6 +23,7 @@ class WebSocketManager {
             onAck: config.onAck || (() => {}),
             onError: config.onError || (() => {}),
             onMessage: config.onMessage || (() => {}),
+            onExperimentUpdate: config.onExperimentUpdate || (() => {}),
         };
 
         this.lastMessageTime = 0;
@@ -90,6 +91,10 @@ class WebSocketManager {
 
                 case 'ack':
                     this.callbacks.onAck(data.payload);
+                    break;
+
+                case 'experiment_update':
+                    this.callbacks.onExperimentUpdate(data.payload);
                     break;
 
                 case 'error':

@@ -1,0 +1,14 @@
+# StarBridge runtime dependencies (lightweight, for teaching)
+# Install: pip install -r requirements-runtime.txt
+fastapi>=0.104.0
+# uvicorn>=0.31 / websockets>=13 handshake incompatibility (verified:
+# client gets "InvalidMessage: did not receive a valid HTTP response").
+# 0.30.x + 12.x is the verified working pair - keep the upper bounds.
+uvicorn[standard]>=0.24.0,<0.31
+PyYAML>=6.0
+pydantic>=2.0
+pydantic-settings>=2.0
+python-multipart>=0.0.6
+websockets>=12.0,<13
+numpy>=1.26
+sgp4>=2.21
