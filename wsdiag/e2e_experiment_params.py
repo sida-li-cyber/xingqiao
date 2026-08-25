@@ -58,8 +58,10 @@ async def main():
             r = await recv_done(ws, exp_id)
             assert r["all_pass"], r["conclusion"]
             used = r["params_used"]
-            assert used == {**params} or all(used[k] == v for k, v in params.items()), \
-                f"params not applied: {used}"
+            for k, v in params.items():
+                got = used[k]
+                ok = abs(got - v) < 1e-9 if isinstance(v, float) else got == v
+                assert ok, f"param {k} not applied: {got} != {v}"
             if expect is not None:
                 m = r["verdict"][0]["measured"]
                 assert abs(m - expect) <= tol, f"{exp_id} measured {m} != {expect}"
