@@ -227,6 +227,10 @@
         .mode-select option { background: #161b27; }
 
         /* ---------- Time-series chart panel ---------- */
+        /* 几何约束：「图层」(#constellationPanel) 可见时，时序指标上边缘与其下边缘完全对齐，
+           且 left 恒等于两者垂直间距（完全对齐 → --panel-gap = 0）。
+           constellationPanel 以 bottom 定位且默认隐藏，故由页尾 syncPanelGeometry
+           脚本按实测矩形动态联动；其隐藏时回退为左下角锚定。 */
         #chartPanel { left: 14px; bottom: 22px; width: 250px; }
         #chartReopen { left: 14px; bottom: 22px; top: auto; }
         .chart-block { margin-bottom: 7px; }
@@ -394,9 +398,14 @@
         }
 
         /* ---------- File transfer panel (Milestone A, C期) ---------- */
-        #filePanel { right: 14px; top: calc(70px + 42vh + 12px); width: 300px; max-height: calc(58vh - 104px); display: flex; flex-direction: column; }
+        /* 几何约束：文件传输上边缘与「统计」(#statsPanel) 下边缘完全对齐，
+           right 偏移恒等于两者垂直间距（完全对齐 → --panel-gap = 0）。
+           此处 CSS 以统计面板 top:70px + max-height:42vh 作相对计算的回退值，
+           实际下边缘由页尾 syncPanelGeometry 脚本按实测矩形动态维持。 */
+        :root { --panel-gap: 0px; }
+        #filePanel { right: var(--panel-gap); top: calc(70px + 42vh + var(--panel-gap)); width: 300px; max-height: calc(58vh - 104px); display: flex; flex-direction: column; }
         #filePanel .panel-body { overflow-y: auto; min-height: 0; }
-        #fileReopen { right: 14px; top: calc(70px + 42vh + 12px); }
+        #fileReopen { right: 14px; top: calc(70px + 42vh + var(--panel-gap)); }
         .file-form { display: flex; flex-direction: column; gap: 7px; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
         .file-form .f-row { display: flex; gap: 7px; }
         .file-form .f-field { flex: 1; display: flex; flex-direction: column; gap: 3px; }
@@ -765,6 +774,65 @@
     <!-- Toast 提示 (P1) -->
     <div id="appToast"></div>
 
+
+    <!-- 面板几何联动：维持「时序指标↔图层」「文件传输↔统计」的对齐/间距约束。
+         - #chartPanel.top = #constellationPanel 下边缘，且 #chartPanel.left = 该垂直间距；
+         - #filePanel.top  = #statsPanel 下边缘，      且 #filePanel.right = 该垂直间距。
+         完全对齐时垂直间距为 0，故水平偏移同步为 0；间距变化时两处恒等。 -->
+    <script>
+    (function () {
+        // 完全对齐：垂直间距取 0，水平偏移与垂直间距恒等（改此值即整体调整）
+        var GAP = 0;
+        var NARROW = '(max-width: 900px)'; // 与 CSS 小屏断点保持一致
+
+        function apply() {
+            var chart = document.getElementById('chartPanel');
+            var cp = document.getElementById('constellationPanel');
+            var file = document.getElementById('filePanel');
+            var stats = document.getElementById('statsPanel');
+            if (!chart || !cp || !file || !stats) return;
+            var narrow = window.matchMedia && window.matchMedia(NARROW).matches;
+
+            // 时序指标 ← 图层：图层面板可见时上边缘对齐其下边缘；隐藏时回退 CSS 默认锚定
+            if (!narrow && cp.offsetParent !== null) {
+                var cpBottom = cp.getBoundingClientRect().bottom;
+                chart.style.top = (cpBottom + GAP) + 'px';
+                chart.style.left = GAP + 'px';
+                chart.style.bottom = 'auto';
+            } else {
+                chart.style.top = '';
+                chart.style.left = '';
+                chart.style.bottom = '';
+            }
+
+            // 文件传输 ← 统计：上边缘对齐统计面板实测下边缘；统计收起/小屏时回退 CSS 锚定
+            if (!narrow && stats.offsetParent !== null) {
+                var statsBottom = stats.getBoundingClientRect().bottom;
+                file.style.top = (statsBottom + GAP) + 'px';
+                file.style.right = GAP + 'px';
+            } else {
+                file.style.top = '';
+                file.style.right = '';
+            }
+        }
+
+        window.addEventListener('resize', apply);
+        // 打开自定义星座、统计面板收起等 display/尺寸变化时重新联动
+        var mo = new MutationObserver(apply);
+        ['constellationPanel', 'statsPanel'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) mo.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });
+        });
+        if (window.ResizeObserver) {
+            var ro = new ResizeObserver(apply);
+            ['constellationPanel', 'statsPanel'].forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el) ro.observe(el);
+            });
+        }
+        apply();
+    })();
+    </script>
 
     <!-- JavaScript Modules -->
     <script src="../js/config.js?v=3kd"></script>
