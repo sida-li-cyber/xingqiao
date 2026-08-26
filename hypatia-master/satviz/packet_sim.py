@@ -151,6 +151,7 @@ DEFAULT_CONFIG = {
     "default_rate_pps": 200.0,        # Poisson arrival rate per source
     "default_prio": PRIO_BEST_EFFORT,  # priority when a flow has none set
     "route_refresh_interval": 5.0,    # seconds
+    "routing_metric": "delay",        # "delay" | "load_aware" (E5)
     "link_error_rate": 0.0,           # per-packet corruption probability
     "max_in_flight": 100000,          # backpressure safety valve
     # Milestone A: file transfer (control plane)
@@ -451,9 +452,17 @@ class PacketEngine:
     # ------------------------------------------------------------------
 
     def _refresh_routes(self):
+        # E5 负载感知路由：链路权重在传播时延上叠加排队拥塞惩罚
+        #（队列半满 ≈ ×5.5，全满 ×10），使 Dijkstra 绕开拥塞链路。
+        load_aware = self.cfg.get("routing_metric") == "load_aware"
+        qcap = max(1, self.cfg["queue_capacity_pkts"])
         radj = defaultdict(list)
         for u in self.adj:
             for v, w in self.adj[u]:
+                if load_aware:
+                    port = self.ports.get((u, v))
+                    if port is not None and port.queued:
+                        w = w * (1.0 + 9.0 * min(1.0, port.queued / qcap))
                 radj[v].append((u, w))
 
         # Route towards background-flow sinks AND every active file-transfer

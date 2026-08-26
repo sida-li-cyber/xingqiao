@@ -47,11 +47,14 @@ from ephemeris import (
     CircularProvider, SGP4Provider, attach_synthetic_sgp4,
     load_tle_file, satrec_nominal_altitude_km,
 )
-# 教学实验沙箱（改进 #2 / 阶段 C）：独立 PacketEngine，与主仿真互不干扰
+# 教学实验沙箱（改进 #2 / 阶段 C + 改进计划 W/S）：独立 PacketEngine，
+# 与主仿真互不干扰；支持最多 MAX_CONCURRENT_EXPERIMENTS 个实验并行（多客户端机房场景）。
 from experiments import (
-    experiment_catalog, run_experiment,
+    experiment_catalog, grade_quiz, run_experiment,
     ExperimentCancelled, ExperimentNotFound,
 )
+
+MAX_CONCURRENT_EXPERIMENTS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -797,11 +800,14 @@ class DemoSimCore:
         self._tick_count = 0
         self.links_full_every = 25
 
-        # 教学实验沙箱状态：同一时刻只跑一个实验；结果经 outbox 在
-        # 主循环里随 5 Hz tick 广播（experiment_update 帧）。
-        self._experiment_task = None
-        self._experiment_cancel = False
+        # 教学实验沙箱状态：最多 4 个实验并行（每客户端一个），结果经
+        # outbox 在主循环里随 5 Hz tick 广播（experiment_update 帧，带 run_id）。
+        self._experiment_runs = {}      # run_id -> asyncio.Task
+        self._experiment_cancels = {}   # run_id -> bool
+        self._experiment_seq = 0
         self._experiment_outbox = []
+        # 并发满时排队（S5）：[{run_id, exp_id, params}]，FIFO。
+        self._experiment_queue = []
 
     # ------------------------------------------------------------------
     # ISL topology (static)
@@ -1496,21 +1502,90 @@ class DemoSimCore:
             # 教学实验（改进 #2）：在独立沙箱引擎中运行，主仿真不受影响。
             exp_id = str(params.get("exp_id", ""))
             run_params = params.get("params") or {}
-            if self._experiment_task and not self._experiment_task.done():
+            # 清理已结束的旧任务记录，再判并发上限。
+            self._experiment_runs = {
+                rid: t for rid, t in self._experiment_runs.items()
+                if not t.done()}
+            self._experiment_seq += 1
+            run_id = f"{exp_id}-{self._experiment_seq:04d}"
+            if len(self._experiment_runs) >= MAX_CONCURRENT_EXPERIMENTS:
+                # S5：并发满 → 排队而非拒绝；前面的任务结束后自动开跑。
+                self._experiment_queue.append(
+                    {"run_id": run_id, "exp_id": exp_id,
+                     "params": run_params})
+                self._experiment_outbox.append({
+                    "message_type": "experiment_update",
+                    "payload": {"exp_id": exp_id, "run_id": run_id,
+                                "status": "queued",
+                                "queue_pos": len(self._experiment_queue)},
+                })
+                print(f"  [experiment] queued: {run_id} "
+                      f"(pos {len(self._experiment_queue)})")
+                return
+            self._experiment_start(exp_id, run_params, run_id)
+            print(f"  [experiment] run: {run_id} params={run_params}")
+        elif action == "experiment_quiz":
+            # 预习测验判分（改进计划 W2）：答案仅存核心侧，前端只传选项序号。
+            exp_id = str(params.get("exp_id", ""))
+            try:
+                grade = grade_quiz(exp_id, params.get("answers") or {})
+                self._experiment_outbox.append({
+                    "message_type": "experiment_update",
+                    "payload": {"exp_id": exp_id, "status": "quiz",
+                                "quiz": grade},
+                })
+                print(f"  [experiment] quiz graded: {exp_id} "
+                      f"{grade['n_correct']}/{grade['n_total']}")
+            except ExperimentNotFound:
                 self._experiment_outbox.append({
                     "message_type": "experiment_update",
                     "payload": {"exp_id": exp_id, "status": "error",
-                                "error": "experiment_busy"},
+                                "error": f"unknown experiment: {exp_id}"},
                 })
-                print(f"  [experiment] busy, rejected: {exp_id}")
-                return
-            self._experiment_cancel = False
-            self._experiment_task = asyncio.get_event_loop().create_task(
-                self._experiment_loop(exp_id, run_params))
-            print(f"  [experiment] run: {exp_id} params={run_params}")
         elif action == "experiment_cancel":
-            self._experiment_cancel = True
-            print("  [experiment] cancel requested")
+            # 带 run_id 取消指定实验（含仍在排队中的）；不带则取消全部。
+            run_id = params.get("run_id")
+            if run_id:
+                before = len(self._experiment_queue)
+                self._experiment_queue = [
+                    q for q in self._experiment_queue
+                    if q["run_id"] != run_id]
+                if len(self._experiment_queue) < before:
+                    self._experiment_outbox.append({
+                        "message_type": "experiment_update",
+                        "payload": {"exp_id": "", "run_id": run_id,
+                                    "status": "cancelled",
+                                    "note": "已从队列移除"},
+                    })
+                    print(f"  [experiment] dequeued: {run_id}")
+                    return
+            targets = ([run_id] if run_id in self._experiment_cancels
+                       else list(self._experiment_cancels))
+            for rid in targets:
+                self._experiment_cancels[rid] = True
+            print(f"  [experiment] cancel requested: {targets or 'none'}")
+
+    def _experiment_start(self, exp_id, run_params, run_id):
+        """启动一个实验任务（并发上限内）。"""
+        self._experiment_cancels[run_id] = False
+        self._experiment_runs[run_id] = (
+            asyncio.get_event_loop().create_task(
+                self._experiment_loop(exp_id, run_params, run_id)))
+
+    def _pump_experiment_queue(self):
+        """并发空位出现时按 FIFO 启动排队实验（S5）。"""
+        self._experiment_runs = {
+            rid: t for rid, t in self._experiment_runs.items()
+            if not t.done()}
+        while (self._experiment_queue
+               and len(self._experiment_runs) < MAX_CONCURRENT_EXPERIMENTS):
+            item = self._experiment_queue.pop(0)
+            self._experiment_start(item["exp_id"], item["params"],
+                                   item["run_id"])
+            print(f"  [experiment] run (dequeued): {item['run_id']}")
+
+    async def _experiment_loop(self, exp_id, run_params=None, run_id=""):
+
         elif action == "set_ais_layer":
             # 真实船舶图层运行时开关：关闭后下一帧 positions 不再包含
             # RShip-*，SSL 链路与 DES 流量随之移除（links_removed 自动生效）
@@ -1603,40 +1678,48 @@ class DemoSimCore:
         def on_progress(update):
             self._experiment_outbox.append({
                 "message_type": "experiment_update",
-                "payload": {"exp_id": exp_id, "status": "running", **update},
+                "payload": {"exp_id": exp_id, "run_id": run_id,
+                            "status": "running", **update},
             })
 
         try:
             result = await run_experiment(
                 exp_id, run_params=run_params, on_progress=on_progress,
-                cancel_check=lambda: self._experiment_cancel)
+                cancel_check=lambda: self._experiment_cancels.get(
+                    run_id, False))
             self._experiment_outbox.append({
                 "message_type": "experiment_update",
-                "payload": {"exp_id": exp_id, "status": "done",
-                            "result": result},
+                "payload": {"exp_id": exp_id, "run_id": run_id,
+                            "status": "done", "result": result},
             })
-            print(f"  [experiment] done: {exp_id} "
-                  f"({'PASS' if result['all_pass'] else 'FAIL'})")
+            print(f"  [experiment] done: {run_id} "
+                  f"({'PASS' if result['all_pass'] else 'FAIL'}) "
+                  f"score={result.get('score')}")
         except ExperimentCancelled:
             self._experiment_outbox.append({
                 "message_type": "experiment_update",
-                "payload": {"exp_id": exp_id, "status": "cancelled"},
+                "payload": {"exp_id": exp_id, "run_id": run_id,
+                            "status": "cancelled"},
             })
-            print(f"  [experiment] cancelled: {exp_id}")
+            print(f"  [experiment] cancelled: {run_id}")
         except ExperimentNotFound as exc:
             self._experiment_outbox.append({
                 "message_type": "experiment_update",
-                "payload": {"exp_id": exp_id, "status": "error",
+                "payload": {"exp_id": exp_id, "run_id": run_id,
+                            "status": "error",
                             "error": f"unknown experiment: {exc}"},
             })
             print(f"  [experiment] unknown: {exp_id}")
         except Exception as exc:                    # noqa: BLE001
             self._experiment_outbox.append({
                 "message_type": "experiment_update",
-                "payload": {"exp_id": exp_id, "status": "error",
-                            "error": repr(exc)},
+                "payload": {"exp_id": exp_id, "run_id": run_id,
+                            "status": "error", "error": repr(exc)},
             })
             print(f"  [experiment] error: {exc!r}")
+        finally:
+            self._experiment_cancels.pop(run_id, None)
+            self._pump_experiment_queue()
 
     # ------------------------------------------------------------------
     # Main loop

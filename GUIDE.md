@@ -368,10 +368,17 @@ python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 50
 
 > 提示：若仿真已跑到 `duration` 上限自动暂停，`file_send` 会自动延长仿真时长并恢复播放，传输不会卡死；seek / stop / reset 等时间跳变会中断在途传输（后端标记为 `CANCELLED`）。详见 [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md)。
 
-### 6.9 教学实验（E1–E4，改进 #2）
+### 6.9 教学实验与教学平台（E1–E7）
 
-面向课堂的"理论 → 仿真 → 对账 → 报告"一体化实验台。点击页面右上角
-**「🧪 教学实验」** 打开面板，四张实验卡片：
+面向课堂的"预习 → 操作 → 存档 → 报告 → 考核"闭环教学平台，三个入口：
+
+| 入口 | URL | 用途 |
+|---|---|---|
+| 演示模式 | `static_html/index.html` | 答辩/展示；右上角「🧪 教学实验」面板可运行 E1–E7 |
+| 学生实验台 | `static_html/lab.html` | 教学工位：左实验列表 / 中输入表单 / 右输出区，参数可调 |
+| 教师端 | `static_html/teacher.html` | 口令登录（默认 `starbridge`）后：统计 / 成绩册 / 班级名单 / 批改 / 考核管理 |
+
+实验目录（E1–E7，核心判据）：
 
 | 编号 | 实验 | 核心判据 |
 |---|---|---|
@@ -379,15 +386,35 @@ python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 50
 | E2 | M/D/1 排队模型 | Wq = ρs/2(1−ρ) = 12 ms，e2e ≈ 24 ms（±3 ms），ρ≈0.8 |
 | E3 | 链路切换丢包 | 尖峰 = 队列 200 + 在途 1 = 201 包（±1 包） |
 | E4 | QoS 严格优先级 | HIGH 时延/丢包 < BE，且 BE loss > 0 |
+| E5 | 路由算法对比 | 拥塞：最短时延丢 (λ−C)/λ、负载感知绕行近零；畅通：两路由 e2e 相当（±5%） |
+| E6 | 星座规模探索 | 网格跳数 = (P−1) + ⌊M/2⌋，e2e = 接入 + 跳数×ISL + 下行 |
+| E7 | 链路预算雨衰 | Ka 雨衰 a dB → 容量 ×10^(−a/10)；拥塞丢包 = 1 − C_eff/λ |
 
-每个实验在**独立沙箱引擎**（独立 `PacketEngine`）中运行，不干扰主星座
-仿真；固定随机种子（42/99/7/11），结果可复现。运行结束自动生成
-**理论-实测对账表**（逐行判定），可一键导出 **HTML 实验报告**
-（含参数表、对账表、结论、姓名学号栏，可直接打印为 PDF）。
+每个实验在**独立沙箱引擎**中运行，不干扰主星座仿真；参数由声明式
+inputs Schema 下发（范围/步进/默认/单位），`experiment_run` 可携带
+`params` 覆盖（越界自动夹紧），理论值随参数动态计算；`params._seed`
+保留键可覆盖默认种子。实验并发上限 4，超限自动排队（queued 帧 +
+queue_pos），适用于多客户端机房。
 
-配套讲义：[docs/experiments/](docs/experiments/)（四份实验指导书 + 教师速查表）。
-协议：命令 `experiment_run` / `experiment_cancel`，推送帧 `experiment_update`
-（status: running / done / cancelled / error），实验目录随 `simulation_init.experiments` 下发。
+**评分闭环（100 分制）**：对账判定 70 + 参数探索 10 + 预习测验 10 +
+思考题 10；预习测验答案仅存核心侧（`experiment_quiz` 命令判分）。
+学生用学号+姓名登录后，实验记录**服务端存档**（对账表/步骤日志/
+评分明细，刷新或换机可恢复），报告在线提交，教师批改（总评 =
+(自动分 + 主观分)/2）。步骤日志字段对齐 ilab-x 2022 版接口规范；
+`realtime_backend/edu_ilabx.py` 提供国标对接适配层（getinfo /
+score_upload，未配置回调时自检模式落盘不发网络请求）。
+
+**考核模式**：教师端创建考核（实验集 / 时长 / 固定种子 / 参数冻结），
+学生端 lab.html 出现考核横幅 + 倒计时，参数锁定，到时自动收卷；
+考核产生的记录带 exam_id，成绩册可追溯。
+
+配套讲义：[docs/experiments/](docs/experiments/)（实验指导书 + 教师速查表）；
+平台设计依据与验收记录：[docs/education-assessment-plan.md](docs/education-assessment-plan.md)。
+协议：命令 `experiment_run` / `experiment_cancel` / `experiment_quiz`，
+推送帧 `experiment_update`（status: queued / running / done / cancelled /
+error / quiz），实验目录随 `simulation_init.experiments` 下发；
+教学数据面为 `realtime_backend/edu_api.py`（`/api/edu/*`，16 个端点，
+`X-Edu-Token` 鉴权）。
 
 ### 6.10 真实轨道（SGP4 / TLE，改进 #3）
 

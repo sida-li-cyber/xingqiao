@@ -23,6 +23,7 @@ Run:  python tests/test_file_e2e.py        (~25 s, spawns backend + core)
 import asyncio
 import hashlib
 import json
+import os
 import random
 import subprocess
 import sys
@@ -33,6 +34,11 @@ import uuid
 from pathlib import Path
 
 import websockets
+
+# 系统代理会劫持对 127.0.0.1 的 HTTP 请求（502），测试内全程旁路
+# （同 test_edu_api.py / test_milestone_c.py 的环境加固）。
+os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
+os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 
 HERE = Path(__file__).resolve()
 PROJECT_ROOT = HERE.parent.parent             # dayilixiang-v3/
