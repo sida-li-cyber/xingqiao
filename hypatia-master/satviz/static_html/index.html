@@ -41,6 +41,22 @@
         /* Cesium 自带工具条（home/全屏）紧邻右上“已连接”徽章左侧，避免重叠 */
         .cesium-viewer-toolbar { top: 14px; right: 110px; }
 
+        /* Cesium SceneModePicker 下拉菜单：抬升至所有自定义玻璃态面板之上。
+           玻璃面板动态推叠 TOP_Z 自 100 递增、断线遮罩最高 60，9999 远高于其常规上限。
+           CesiumJS 1.141 中下拉菜单被 .cesium-sceneModePicker-wrapper 包裹，
+           该 wrapper 自带 z-index:0 形成堆叠上下文，必须连同 wrapper 一起抬升，
+           否则内部下拉的 z-index 会被困住；显式 position 保证 z-index 生效，
+           pointer-events 保证菜单项可点击 */
+        .cesium-sceneModePicker-wrapper {
+            position: relative;
+            z-index: 9999;
+        }
+        .cesium-sceneModePicker-dropDown {
+            position: absolute;
+            z-index: 9999;
+            pointer-events: auto;
+        }
+
         /* ---------- Glass panel base ---------- */
         .glass {
             position: absolute;
