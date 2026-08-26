@@ -68,14 +68,21 @@ python -m http.server 8080
 satviz/
 ├── static_html/
 │   ├── index.html              # 主前端页面（CesiumJS 1.141 + 完整UI）
+│   ├── lab.html                # 教学实验台独立页面（E1~E4 沙箱实验）
 │   ├── top.html                # 旧版模板（保留用于离线静态页生成）
 │   └── bottom.html             # 旧版模板（保留用于离线静态页生成）
 ├── js/
-│   ├── websocket.js            # WebSocket通信模块
+│   ├── config.js               # SBConfig：WS/API 地址解析（支持 ?ws=host:port 覆盖）
+│   ├── constants.js            # SBConstants：链路/节点类型标签与颜色单一来源
+│   ├── websocket.js            # WebSocket通信模块（指数退避重连 + 消息队列上限）
+│   ├── protocol31.js           # 协议 3.1 紧凑帧解码纯函数（node:test 可单测）
 │   ├── cesium-manager.js       # Cesium 3D场景管理模块
+│   ├── packet-flow.js          # 沿链路包流动动画（overlay 池）
+│   ├── chart.js                # 时序图表面板
+│   ├── experiment.js           # 教学实验目录元数据
+│   ├── lab.js                  # 教学实验台（lab.html 专用）
 │   ├── ui-controller.js        # UI交互控制模块
-│   ├── app.js                  # 主应用程序（组件编排）
-│   └── hypatia-adapter.js      # Hypatia数据适配器示例
+│   └── app.js                  # 主应用程序（组件编排 + 协议归一化）
 ├── scripts/
 │   ├── visualize_constellation.py   # 静态星座可视化生成
 │   ├── visualize_path.py           # 静态路径可视化生成
@@ -86,6 +93,9 @@ satviz/
 ├── FRONTEND_README.md          # 本文档
 └── viz_output/                 # 输出目录
 ```
+
+> 历史说明：`js/hypatia-adapter.js`（Hypatia 数据适配器示例）已于前端 P3 清理中移除，
+> 前端从未在运行时引用该文件。
 
 ---
 
@@ -169,6 +179,8 @@ satviz/
 - `_rebuildPositions`: 由 `sat_pos` + `sat_order` + 恒定高度还原全量位置；
 - `_mergeLinks` / `_expandLink`: 将短键 delta 合并进客户端 `linkCache`
   （`links_full` 重置、`links_removed` 剪枝），再展开为长格式交给 `syncLinks`；
+- 上述三个解码逻辑已提取为纯函数模块 `js/protocol31.js`（无 DOM / Cesium 依赖），
+  app.js 仅做委托，单测见 `tests/frontend/protocol31.test.js`；
 - 小规模星座（≤200 星）在首帧后用 `isl_topology` 绘制静态 ISL 网格
   （`CesiumManager.setStaticISLMesh`，装饰性、不可拾取）；千星级仅渲染有流量的链路。
 
@@ -194,8 +206,8 @@ satviz/
 ### 仿真核心需要实现
 
 1. 连接到 `ws://<host>:<port>/ws/core`
-2. 连接后立即发送 `simulation_init` 消息
-3. 按照 ~10Hz 频率持续发送 `state_update` 消息
+2. 连接后立即发送 `simulation_init` 消息（payload 含 `update_rate_hz`，当前为 5）
+3. 按照 5 Hz 频率持续发送 `state_update` 消息（前端按墙钟插值平滑为逐帧连续运动）
 4. 监听来自后端的 `command` 消息并响应
 
 ### 参考实现
@@ -256,9 +268,64 @@ python test_reconnect.py             # 断线重连健壮性（自动起停 back
 - 包级指标对账（时延/吞吐 vs 理论值、包守恒、M/D/1 排队）与长时压测
 - 详见 `docs/phase6-validation.md`
 
+### 前端单测（node:test）
+
+协议解码纯函数位于 `tests/frontend/`，不依赖浏览器，用 Node 自带测试运行器执行：
+
+```powershell
+node --test tests/frontend/
+```
+
+仓库未假定全局安装 Node；无 Node 环境时可用便携版（解压后直接调用 node.exe）：
+
+```powershell
+tools\node-portable\node-v20.18.1-win-x64\node.exe --test tests\frontend\
+```
+
+---
+
+## 渲染性能与 Primitive API 预研结论
+
+已实施（P2）：
+- 链路 / ISL 网格的 `CallbackProperty` positions 回调改用 per-entity scratch 数组，
+  消除每帧 `Cartesian3` 临时对象分配；
+- 统计面板新增渲染诊断行（实体总数、插值段数、流动 overlay 数）。
+
+Primitive API（`PointPrimitiveCollection` / `PolylineCollection`）预研结论：
+- 优势：把上千个点/线段合并进单个 draw call，绕开 Entity 层的属性跟踪与
+  逐实体更新开销，是千星级渲染的常规解法；
+- 代价：拾取、逐链路着色、标签、选中高亮等交互能力都需基于 Primitive 重建，
+  迁移面大且与现有 Entity 交互代码耦合深；
+- 结论：当前 72 星演示与 440 星预设下 Entity 方案 FPS 充足，**暂不引入**；
+  若 1584 星全量渲染时帧耗成为瓶颈，优先策略仍是“只绘有流量链路 + 静态
+  ISL 网格”，其次再评估混合方案（节点用 PointPrimitive，链路保留 Entity）。
+
 ---
 
 ## 版本历史
+
+### 可选星座（Selectable Constellations）
+- 星座预设：`demo72` / `demo440` / `starlink`（1584 星）/ `kuiper`
+  （34×34，630 km / 51.9°）/ `telesat`（27×13，1015 km / 98.98°），
+  CLI `--constellation` 指定；旧 `--scale 72|440|1584` 保持兼容
+- 运行时热切换：前端播放栏新增星座下拉框（含自定义 Walker-δ 单壳层
+  参数表单），经 `set_constellation` 命令原地重建星座并重发
+  `simulation_init`，无需重启核心；TLE 模式下该命令被忽略
+- `simulation_init` 新增 `constellation` 字段（name/label/sat_count/shells），
+  前端据此回显选择器状态并回填自定义参数
+- 新增 `tests/test_constellation.py`（预设参数 / 热切换 / 非法参数拒绝，10 例）
+
+### 前端改进批次（P0–P3）
+- **P0**：修复 renderFileList XSS（转义文件名）；多客户端播放状态同步
+  （核心下发 `is_playing`，按钮由权威状态驱动）；详情/统计面板重叠修复；
+  WS 离线消息队列 50 条上限（满时丢最旧）
+- **P1**：断线全局遮罩 + 手动重连；alert() 统一换 toast；`SBConfig`
+  WS/API 地址可配置（`?ws=host:port`）；键盘快捷键（空格/S/Esc）；小屏响应式
+- **P2**：链路 positions 回调 scratch 数组复用；渲染诊断指标；
+  Primitive API 预研结论（见上节，暂不引入）
+- **P3**：删除死代码 `hypatia-adapter.js` 与 5 个遗留指令方法；链路/节点
+  颜色常量收敛至 `constants.js`；协议 3.1 解码提取为 `protocol31.js` 纯函数
+  并补 node:test 单测（9 例）；本文档同步更新（5 Hz 频率纠正等）
 
 ### v3.1 (Thousand-Satellite Scale / 阶段7)
 - 千星级规模：多壳层 Walker-δ 生成器 + `--scale 72|440|1584` 预设

@@ -257,25 +257,34 @@ python demo_sim_core.py
 
 可选参数：
 ```
-python demo_sim_core.py --constellation Kuiper --shell 1
-python demo_sim_core.py --constellation Telesat --shell 0
-python demo_sim_core.py --port 9000  # 如果后端使用非默认端口
+python demo_sim_core.py --constellation kuiper    # 可选星座预设
+python demo_sim_core.py --constellation telesat
+python demo_sim_core.py --scale 1584              # 旧版规模预设（兼容）
+python demo_sim_core.py --port 9000               # 后端使用非默认端口时
 ```
+
+`--constellation` 可选值：`demo72`（默认）/ `demo440` / `starlink`（1584 星）/
+`kuiper`（1156 星，630 km / 51.9°）/ `telesat`（351 星，1015 km / 98.98°）。
+运行中也可通过前端播放栏的星座下拉框热切换，无需重启核心。
 
 成功输出：
 ```
-==================================================
-  Demo Simulation Core
-==================================================
-  Constellation: Starlink shell 0
-  Satellites: 108
+=======================================================
+  Demo Simulation Core v2 — Multi-Domain
+=======================================================
+  Satellites:      72
+  UAVs:            8
+  Ships:           10
   Ground Stations: 15
-  Pre-computed Links: 110
-  Duration: 600.0s
-==================================================
+  ISL links:       144
+  Constellation:   demo72
+  Ephemeris:       circular
+  Duration:        600.0s
+  Protocol:        v3
+=======================================================
 Connecting to ws://localhost:8000/ws/core...
 Connected to backend!
-Sent simulation_init
+Sent simulation_init (v3)
 ```
 
 **终端 3：启动前端 HTTP 服务**
@@ -289,14 +298,14 @@ python -m http.server 8080
 
 ### 6.2 运行选项说明
 
-**前端控制面板功能**：
-- **Play/Pause/Stop/Reset**：仿真播放控制
-- **Speed 滑块** (0.1x–10x)：调节仿真速度
-- **Timeline 滑块**：拖拽跳转到任意时间点
-- **Metrics 下拉框**：切换显示指标（带宽利用率、延迟、丢包率、链路状态）
-- **Scenario 下拉框**：切换仿真场景（影响链路丢包/抖动参数）
-- **Constellation 下拉框**：切换星座（Starlink/Kuiper/Telesat）及壳层
-- **Node Filter**：选择性显示/隐藏卫星和地面站
+**前端控制面板功能**（v3 悬浮面板 UI）：
+- **播放条**：播放/暂停/停止 + 时间轴拖拽 + 倍速（0.5x–10x）
+- **星座下拉框**（可选星座）：切换 demo72 / demo440 / Starlink 1584 /
+  Kuiper 1156 / Telesat 351，或自定义 Walker-δ 单壳层参数；
+  切换后核心热重建并自动刷新场景，无需重启
+- **图层面板**：按节点类型（卫星/无人机/船舶/地面站）与链路类型
+  （ISL/GSL/SUL/SSL）显示或隐藏
+- **指标下拉框**：切换链路着色指标（带宽利用率/时延/丢包等）
 - **点击交互**：左键选中卫星/链路查看详情，右键取消选中
 
 **命令行参数**：
@@ -309,8 +318,10 @@ python -m http.server 8080
 | 后端 | `--reload` | 关闭 | 文件变更时自动重载（开发用） |
 | 核心 | `--host` | `localhost` | 后端地址 |
 | 核心 | `--port` | `8000` | 后端端口 |
-| 核心 | `--constellation` | `Starlink` | 星座名称 |
-| 核心 | `--shell` | `0` | 壳层索引（0-based） |
+| 核心 | `--constellation` | `demo72` | 星座预设：demo72 / demo440 / starlink / kuiper / telesat |
+| 核心 | `--scale` | 无 | 旧版规模预设 72 / 440 / 1584（兼容，优先用 --constellation） |
+| 核心 | `--ephemeris` | `circular` | 轨道传播模型：circular / sgp4 |
+| 核心 | `--tle` | 无 | 真实 TLE 编目（本地文件 / celestrak:组名 / url:地址） |
 
 ### 6.3 访问 API 文档
 

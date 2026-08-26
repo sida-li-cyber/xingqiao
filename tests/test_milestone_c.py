@@ -9,7 +9,11 @@ This is an INTEGRATION test: it needs a running stack, exactly like the
 browser drives it —
 
     1. realtime_backend on :8000          (python -m realtime_backend.run)
-    2. demo_sim_core connected to it      (python demo_sim_core.py --scale 1584)
+    2. demo_sim_core connected to it      (any scale; --scale 1584 also ok)
+
+Hard-coded satellite IDs (e.g. Sat-20-10) only exist at large scales; on a
+smaller running constellation they are auto-resolved to live satellite IDs
+fetched from the first state_update frame, so the suite passes at any scale.
 
 It replicates the frontend flow over HTTP / WebSocket:
 
@@ -59,6 +63,52 @@ CASES = [
 
 RATE_BPS = 5_000_000
 PER_CASE_TIMEOUT = 150.0
+
+
+def fetch_live_sat_ids() -> list:
+    """Satellite IDs present in the running stack (scale-agnostic).
+
+    State frames carry no per-satellite IDs (sat_pos is a compact array),
+    but GSL links are announced every frame as "GS--Sat-x-y" keys, so the
+    live satellite id set is recovered from the link keys.
+    """
+    async def _get():
+        async with websockets.connect(WSURL, max_size=None) as ws:
+            while True:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=20))
+                if msg.get("message_type") != "state_update":
+                    continue
+                links = ((msg.get("payload") or {}).get("links") or {})
+                sats = sorted({tok for key in links for tok in key.split("--")
+                               if tok.startswith("Sat-")})
+                if sats:
+                    return sats
+    return asyncio.run(_get())
+
+
+def resolve_cases() -> list:
+    """Swap hard-coded satellite IDs the running scale lacks for live ones.
+
+    E.g. Sat-20-10 / Sat-40-7 exist only at --scale 1584; on the default
+    72-sat constellation (Sat-0..5-0..11) they would be unroutable and the
+    transfer could never complete. Distinct picks keep src != dst.
+    """
+    sats = fetch_live_sat_ids()
+    have = set(sats)
+
+    def pick(idx):
+        return sats[idx % len(sats)]
+
+    out = []
+    for src, dst, size in CASES:
+        if src.startswith("Sat-") and src not in have:
+            src = pick(len(out))
+        if dst.startswith("Sat-") and dst not in have:
+            dst = pick(len(out) + 1)
+        if src == dst:
+            dst = pick(len(out) + 2)
+        out.append((src, dst, size))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +172,7 @@ def check_stack() -> bool:
 
 def test_arbitrary_pairs() -> list[dict]:
     results = []
-    for i, (src, dst, size) in enumerate(CASES):
+    for i, (src, dst, size) in enumerate(resolve_cases()):
         data = os.urandom(size)
         sha = hashlib.sha256(data).hexdigest()
         rec = upload(data, "mc_case%d.bin" % i)
@@ -148,6 +198,9 @@ def test_arbitrary_pairs() -> list[dict]:
 
 def test_moving_dst_handover() -> dict:
     src, dst = "Beijing", "Sat-30-5"
+    have = set(fetch_live_sat_ids())
+    if dst not in have:
+        dst = sorted(have)[3 % len(have)]
     size, rate = 600 * 1024, 180_000     # ~27 s of sim time -> many topo updates
     data = os.urandom(size)
     sha = hashlib.sha256(data).hexdigest()
