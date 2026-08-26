@@ -51,15 +51,17 @@ class SatelliteVisualizationApp {
             this.cesium = new CesiumManager('cesiumContainer', { cesiumToken });
             this.cesium.initialize();
 
-            // Initialize WebSocket Manager
+            // Initialize WebSocket Manager（地址来自 SBConfig，可用 ?ws=host:port 覆盖）
             this.ws = new WebSocketManager({
-                host: (!window.location.hostname || window.location.hostname === 'localhost')
-                    ? '127.0.0.1'
-                    : window.location.hostname,
-                port: 8000,
+                host: window.SBConfig ? window.SBConfig.host : '127.0.0.1',
+                port: window.SBConfig ? window.SBConfig.port : 8000,
                 path: '/ws/client',
                 onConnect: () => this.handleWSConnect(),
                 onDisconnect: () => this.handleWSDisconnect(),
+                onReconnectFailed: () => {
+                    // 自动重连耗尽：遮罩切换为手动重连提示
+                    if (this.ui) this.ui.updateConnectionStatus(false, 'failed');
+                },
                 onStateUpdate: (payload) => this.handleStateUpdate(payload),
                 onSimulationInit: (payload) => this.handleSimulationInit(payload),
                 onAck: (payload) => this.handleAck(payload),
@@ -106,6 +108,14 @@ class SatelliteVisualizationApp {
 
     handleSimulationInit(payload) {
         console.log('[App] simulation_init received, version:', payload.version);
+
+        // 防御：空 init（如误连同一后端的测试 mock 核心）不清空现有场景；
+        // 真实核心的 init 必带 nodes（v3）或非空 satellites（v2）
+        if (!payload.nodes &&
+            !(Array.isArray(payload.satellites) && payload.satellites.length)) {
+            console.warn('[App] Ignoring simulation_init without node definitions');
+            return;
+        }
 
         // Clear previous state
         this.cesium.clearAll();
@@ -253,6 +263,12 @@ class SatelliteVisualizationApp {
                 }
             }
 
+            // 多客户端播放状态同步：核心是唯一权威，播放按钮跟随
+            // is_playing（旧版核心不带该字段时跳过，退化为本地状态）
+            if (typeof payload.is_playing === 'boolean') {
+                this.ui.syncPlayState(payload.is_playing);
+            }
+
         } catch (error) {
             this.cesium.endBatch();
             console.error('[App] Error processing state_update:', error);
@@ -283,25 +299,10 @@ class SatelliteVisualizationApp {
      * Rebuild the full positions dict from a 3.1 frame: satellites travel as
      * a compact sat_pos array ([[lat, lon], ...] aligned to sat_order, with
      * constant altitude from init); UAVs / ships arrive in `positions`.
+     * （P3：纯函数已提取至 protocol31.js，便于 node:test 单测）
      */
     _rebuildPositions(payload) {
-        const positions = {};
-        const sp = payload.sat_pos;
-        if (sp && this.satOrder.length) {
-            const n = Math.min(sp.length, this.satOrder.length);
-            for (let i = 0; i < n; i++) {
-                const id = this.satOrder[i];
-                positions[id] = {
-                    lat: sp[i][0],
-                    lon: sp[i][1],
-                    alt: this.satAltM[id] || 550000,
-                };
-            }
-        }
-        if (payload.positions) {
-            Object.assign(positions, payload.positions);
-        }
-        return positions;
+        return Protocol31.rebuildPositions(payload, this.satOrder, this.satAltM);
     }
 
     /**
@@ -310,21 +311,8 @@ class SatelliteVisualizationApp {
      * `links_removed` lists keys to prune between full frames.
      */
     _mergeLinks(payload) {
-        if (payload.links_full) {
-            this.linkCache = {};
-        }
-        const links = payload.links;
-        if (links) {
-            for (const key in links) {
-                this.linkCache[key] = this._expandLink(key, links[key]);
-            }
-        }
-        const removed = payload.links_removed;
-        if (removed && removed.length) {
-            for (const key of removed) {
-                delete this.linkCache[key];
-            }
-        }
+        this.linkCache = Protocol31.mergeLinks(
+            this.linkCache, payload, this.linkTypes, this.queueCapacityPkts);
     }
 
     /**
@@ -332,23 +320,7 @@ class SatelliteVisualizationApp {
      * shape consumed by CesiumManager.syncLinks / UIController link detail.
      */
     _expandLink(key, v) {
-        const dash = key.indexOf('--');
-        const lt = this.linkTypes[v.t] || {};
-        return {
-            type: v.t,
-            source: dash >= 0 ? key.slice(0, dash) : key,
-            target: dash >= 0 ? key.slice(dash + 2) : '',
-            is_active: true,
-            bandwidth_utilization: v.u || 0,
-            latency_ms: v.l || 0,
-            loss_rate: v.d || 0,
-            tx_bps: v.tx || 0,
-            capacity_bps: lt.capacity_bps || 0,
-            queue_depth: v.q || 0,
-            // Every undirected link aggregates two directed ports.
-            queue_capacity: this.queueCapacityPkts * 2,
-            propagation_ms: v.p || 0,
-        };
+        return Protocol31.expandLink(key, v, this.linkTypes, this.queueCapacityPkts);
     }
 
     /**

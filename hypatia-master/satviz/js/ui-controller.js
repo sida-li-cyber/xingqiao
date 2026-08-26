@@ -5,6 +5,18 @@
  * per-node filter lists/offline CZML) removed.
  */
 
+/** 转义不可信字符串（如用户上传的文件名）后再拼入 HTML，防止 XSS 注入 */
+function _escHtml(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+}
+
+/** 类型元数据统一取自 constants.js（SBConstants），未加载时使用内置回退 */
+function _sharedTypeMeta(key, fallback) {
+    return (window.SBConstants && window.SBConstants[key]) || fallback;
+}
+
 class UIController {
     constructor(cesiumManager, websocketManager, app) {
         this.cesium = cesiumManager;
@@ -26,22 +38,23 @@ class UIController {
         this._selectedFileId = null;     // transfer whose path is highlighted
         this._fileTransfers = {};        // latest file_transfers snapshot
         this._filePathCache = null;      // last highlighted path signature
-        const wsHost = (this.ws && this.ws.host) ? this.ws.host : '127.0.0.1';
-        this.apiBase = `http://${wsHost}:8000`;
+        // HTTP API 基址取自 SBConfig（与 WebSocket 同源，支持 ?ws=host:port 覆盖）
+        this.apiBase = (window.SBConfig && window.SBConfig.apiBase) ||
+            `http://${(this.ws && this.ws.host) || '127.0.0.1'}:8000`;
 
-        // Display metadata for badges
-        this.linkTypeMeta = {
+        // Display metadata for badges（P3：收敛自 constants.js）
+        this.linkTypeMeta = _sharedTypeMeta('LINK_TYPES', {
             isl: { label: 'ISL 星间链路', color: '#4FC3F7' },
             gsl: { label: 'GSL 地面-卫星', color: '#FF8A65' },
             sul: { label: 'SUL 卫星-无人机', color: '#81C784' },
             ssl: { label: 'SSL 卫星-船舶', color: '#FFB74D' },
-        };
-        this.nodeTypeMeta = {
+        });
+        this.nodeTypeMeta = _sharedTypeMeta('NODE_TYPES', {
             satellite:      { label: '卫星',   color: '#1E90FF' },
             uav:            { label: '无人机', color: '#32CD32' },
             ship:           { label: '船舶',   color: '#FFA500' },
             ground_station: { label: '地面站', color: '#FF4500' },
-        };
+        });
     }
 
     // ==================================================================
@@ -125,7 +138,9 @@ class UIController {
         this._lastChartDrops = null;
         this._lastChartPush = 0;
 
-        // Panel collapse / reopen
+        // Panel collapse / reopen（注册到 _panels，供详情面板打开时程序化收起）
+        this._panels = {};
+        this._statsCollapsedByDetail = false;
         this._bindCollapse('layersPanel', 'layersCollapse', 'layersReopen');
         this._bindCollapse('statsPanel', 'statsCollapse', 'statsReopen');
         this._bindCollapse('chartPanel', 'chartCollapse', 'chartReopen');
@@ -146,22 +161,50 @@ class UIController {
             if (toast) toast.classList.add('hide');
         }, 8000);
 
+        // 键盘快捷键：空格 = 播放/暂停，S = 停止，Esc = 取消选择并关闭详情
+        const reconnectBtn = document.getElementById('reconnectBtn');
+        if (reconnectBtn) {
+            reconnectBtn.addEventListener('click', () => this.ws.manualReconnect());
+        }
+
+        document.addEventListener('keydown', (e) => {
+            const tag = (e.target && e.target.tagName) || '';
+            if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'BUTTON') return;
+            if (e.code === 'Space') {
+                e.preventDefault();
+                this.togglePlayPause();
+            } else if (e.key === 's' || e.key === 'S') {
+                this.stopPlayback();
+            } else if (e.key === 'Escape') {
+                this.hideDetail();
+                this.cesium.clearSelection();
+            }
+        });
+
         console.log('[UIController] UI initialized (v3 minimal)');
     }
 
     _bindCollapse(panelId, btnId, reopenId) {
         const panel = document.getElementById(panelId);
         const reopen = document.getElementById(reopenId);
-        document.getElementById(btnId).addEventListener('click', () => {
+        // 收起 / 重开动作封装为函数，注册到 _panels 供程序化调用
+        const collapse = () => {
             panel.classList.add('collapsed');
             panel.style.display = 'none';
             reopen.style.display = 'block';
-        });
-        reopen.addEventListener('click', () => {
+        };
+        const reopenFn = () => {
             panel.classList.remove('collapsed');
             panel.style.display = 'block';
             reopen.style.display = 'none';
-        });
+        };
+        document.getElementById(btnId).addEventListener('click', collapse);
+        reopen.addEventListener('click', reopenFn);
+        this._panels[panelId] = {
+            collapse,
+            reopen: reopenFn,
+            isOpen: () => panel.style.display !== 'none',
+        };
     }
 
     // ==================================================================
@@ -169,23 +212,28 @@ class UIController {
     // ==================================================================
 
     togglePlayPause() {
-        const btn = document.getElementById('playPauseBtn');
+        // 只发送指令，不在本地翻转状态：按钮图标由 syncPlayState() 依据
+        // 核心在 state_update 中下发的权威 is_playing 驱动，保证多客户端一致
         if (this.isPlaying) {
             this.ws.sendPauseCommand();
-            btn.textContent = '▶';
-            this.isPlaying = false;
         } else {
             this.ws.sendPlayCommand();
-            btn.textContent = '⏸';
-            this.isPlaying = true;
         }
     }
 
     stopPlayback() {
         this.ws.sendStopCommand();
-        const btn = document.getElementById('playPauseBtn');
-        btn.textContent = '▶';
-        this.isPlaying = false;
+    }
+
+    /**
+     * 由核心下发的 is_playing 驱动播放按钮状态（多客户端一致性的唯一来源）。
+     * 旧版核心不带该字段时 app 层不会调用本方法，退化为本地状态。
+     */
+    syncPlayState(isPlaying) {
+        if (typeof isPlaying !== 'boolean' || isPlaying === this.isPlaying) return;
+        this.isPlaying = isPlaying;
+        document.getElementById('playPauseBtn').textContent =
+            isPlaying ? '⏸' : '▶';
     }
 
     setSpeed(speed) {
@@ -279,6 +327,7 @@ class UIController {
             `<div class="detail-status"><span class="dot" id="dStatusDot"></span><span id="dStatus">--</span></div>`;
 
         document.getElementById('detailPanel').style.display = 'block';
+        this._autoCollapseStats();
         this.updateLinkDetail(data);
     }
 
@@ -360,6 +409,7 @@ class UIController {
             `</div>`;
 
         document.getElementById('detailPanel').style.display = 'block';
+        this._autoCollapseStats();
         this.updateNodeDetail(data);
     }
 
@@ -392,10 +442,25 @@ class UIController {
             : '—';
     }
 
+    /** detailPanel 与 statsPanel 共用屏幕右上角位置：打开详情时自动
+     *  收起统计面板，关闭详情时恢复（用户期间手动重开过则不再干预）。 */
+    _autoCollapseStats() {
+        const p = this._panels['statsPanel'];
+        if (p && p.isOpen() && !this._statsCollapsedByDetail) {
+            p.collapse();
+            this._statsCollapsedByDetail = true;
+        }
+    }
+
     hideDetail() {
         this._detailKind = null;
         this._detailId = null;
         document.getElementById('detailPanel').style.display = 'none';
+        if (this._statsCollapsedByDetail) {
+            this._statsCollapsedByDetail = false;
+            const p = this._panels['statsPanel'];
+            if (p && !p.isOpen()) p.reopen();
+        }
     }
 
     /** Is the detail panel currently showing this link? */
@@ -414,12 +479,49 @@ class UIController {
     // Status / statistics
     // ==================================================================
 
-    updateConnectionStatus(isConnected) {
+    updateConnectionStatus(isConnected, reason) {
         const dot = document.getElementById('connectionIndicator');
         const text = document.getElementById('connectionStatus');
         dot.classList.toggle('on', isConnected);
         text.textContent = isConnected ? '已连接' : '未连接';
         text.style.color = isConnected ? 'var(--good)' : 'var(--bad)';
+        // 断线全局遮罩：默认显示自动重连进度；自动重连耗尽
+        // （reason === 'failed'）后切换为手动重连提示
+        if (isConnected) {
+            this._hideConnOverlay();
+        } else {
+            this._showConnOverlay(reason === 'failed');
+        }
+    }
+
+    _showConnOverlay(reconnectExhausted) {
+        const overlay = document.getElementById('connOverlay');
+        if (!overlay) return;
+        const msg = document.getElementById('connOverlayMsg');
+        if (msg) {
+            msg.textContent = reconnectExhausted
+                ? '自动重连已达上限，请点击按钮手动重连'
+                : '正在自动重连…';
+        }
+        overlay.style.display = 'flex';
+    }
+
+    _hideConnOverlay() {
+        const overlay = document.getElementById('connOverlay');
+        if (overlay) overlay.style.display = 'none';
+    }
+
+    /**
+     * 轻量 toast 提示（替代 alert，不阻塞交互）。
+     * type: 'info' | 'ok' | 'bad'
+     */
+    showToast(msg, type = 'info', duration = 3000) {
+        const toast = document.getElementById('appToast');
+        if (!toast) return;
+        toast.textContent = msg;
+        toast.className = `show ${type}`;
+        clearTimeout(this._toastTimer);
+        this._toastTimer = setTimeout(() => { toast.className = ''; }, duration);
     }
 
     updateStatistics(stats) {
@@ -429,6 +531,13 @@ class UIController {
         document.getElementById('staCount').textContent = stats.ground_stations || 0;
         document.getElementById('linkCount').textContent = stats.links || 0;
         document.getElementById('fpsCounter').textContent = (stats.fps || 0) + ' FPS';
+        // P2 渲染诊断：实体总数 · 插值段数 · 包流动 overlay 数
+        const diag = document.getElementById('renderDiag');
+        if (diag) {
+            diag.textContent = `${stats.entities || 0} 实体 · `
+                + `${stats.interpSegments || 0} 插值 · `
+                + `${stats.flowOverlays || 0} 流动`;
+        }
     }
 
     /**
@@ -723,7 +832,7 @@ class UIController {
             this.onFilePicked(null);
         } catch (err) {
             console.error('[UI] file upload/send failed:', err);
-            alert('上传失败：' + err.message + '\n（确认后端 realtime_backend 已启动）');
+            this.showToast('上传失败：' + err.message + '（确认后端 realtime_backend 已启动）', 'bad', 5000);
             btn.disabled = false;
         } finally {
             btn.textContent = oldLabel;
@@ -761,15 +870,17 @@ class UIController {
             }
             const thr = this.fmtThroughput(t.throughput_bps);
             const eta = t.state === 'TRANSFERRING' ? this.fmtEta(t.eta_s) : '—';
-            return `<div class="file-card${sel}" data-fid="${fid}">` +
-                `<div class="fc-top"><span class="fc-name" title="${t.name}">${t.name}</span>` +
+            // 文件名 / 端点名来自用户上传与网络下发，必须先转义再拼 HTML
+            const name = _escHtml(t.name || fid);
+            return `<div class="file-card${sel}" data-fid="${_escHtml(fid)}">` +
+                `<div class="fc-top"><span class="fc-name" title="${name}">${name}</span>` +
                 `<span class="fc-badge ${t.state}">${stateLabel[t.state] || t.state}</span></div>` +
                 `<div class="fc-bar"><div style="width:${pct}%"></div></div>` +
                 `<div class="fc-meta">` +
                 `<b>${pct}%</b> · ${this.fmtBytes(t.delivered_bytes)}/${this.fmtBytes(t.total_bytes)}<br>` +
                 `${thr} · ETA ${eta} · 重传 ${t.retx || 0}` +
                 `</div>` +
-                `<div class="fc-path">${t.src} → ${t.dst} · ${path}</div>` +
+                `<div class="fc-path">${_escHtml(t.src)} → ${_escHtml(t.dst)} · ${_escHtml(path)}</div>` +
                 actions +
                 `</div>`;
         }).join('');

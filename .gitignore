@@ -7,6 +7,7 @@ venv/
 
 # Node
 node_modules/
+tools/node-portable/
 
 # IDE
 .idea/

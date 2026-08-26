@@ -447,6 +447,74 @@
             transition: opacity 0.6s;
         }
         #hintToast.hide { opacity: 0; }
+
+        /* ---------- 断线遮罩 (P1) ---------- */
+        #connOverlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(5, 8, 16, 0.74);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
+            z-index: 60;
+            display: none;
+            align-items: center;
+            justify-content: center;
+        }
+        #connOverlay .co-card {
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            padding: 26px 34px;
+            text-align: center;
+            max-width: 360px;
+        }
+        #connOverlay .co-title { font-size: 16px; font-weight: 600; margin-bottom: 8px; }
+        #connOverlay .co-msg { font-size: 12.5px; color: var(--text-dim); margin-bottom: 18px; line-height: 1.7; }
+        #connOverlay .co-btn {
+            background: var(--accent); color: #04121f; border: none; border-radius: 8px;
+            padding: 9px 22px; font-size: 13px; font-weight: 600; cursor: pointer;
+            transition: background 0.15s;
+        }
+        #connOverlay .co-btn:hover { background: #67d3fb; }
+
+        /* ---------- Toast 提示 (P1，替代 alert) ---------- */
+        #appToast {
+            position: absolute;
+            top: 64px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: var(--bg-glass);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 8px 18px;
+            font-size: 12.5px;
+            z-index: 50;
+            backdrop-filter: blur(14px);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.3s;
+            max-width: 70vw;
+        }
+        #appToast.show { opacity: 1; }
+        #appToast.ok { color: var(--good); }
+        #appToast.bad { color: var(--bad); }
+
+        /* ---------- 小屏响应式适配 (P1) ---------- */
+        @media (max-width: 900px) {
+            #brand .sub { display: none; }
+            #chartPanel { display: none; }
+            #chartReopen { display: none !important; }
+            #filePanel { top: auto; bottom: 92px; max-height: 40vh; width: 280px; }
+            #fileReopen { top: auto; bottom: 92px; }
+            #detailPanel { width: min(280px, calc(100vw - 28px)); }
+        }
+        @media (max-width: 600px) {
+            #layersPanel { display: none; }
+            #layersReopen { display: none !important; }
+            #playbackBar { gap: 8px; padding: 8px 10px; bottom: 14px; }
+            #hintToast { display: none; }
+        }
     </style>
 </head>
 <body>
@@ -505,6 +573,7 @@
             <div class="stat-row"><span class="k">地面站</span><span class="v" id="staCount">0</span></div>
             <div class="stat-row"><span class="k">链路</span><span class="v" id="linkCount">0</span></div>
             <div class="stat-row"><span class="k">帧率</span><span class="v" id="fpsCounter">0</span></div>
+            <div class="stat-row"><span class="k">渲染诊断</span><span class="v" id="renderDiag" style="font-size:10.5px">--</span></div>
             <div id="metricsSummary">等待数据…</div>
         </div>
     </div>
@@ -605,13 +674,29 @@
     <!-- Hint toast -->
     <div id="hintToast">点击链路或节点查看实时状态 · 右键取消选择</div>
 
+    <!-- 断线遮罩 (P1)：断线时全屏提示，自动重连耗尽后提供手动重连 -->
+    <div id="connOverlay">
+        <div class="co-card">
+            <div class="co-title">⚠ 连接已断开</div>
+            <div class="co-msg" id="connOverlayMsg">正在自动重连…</div>
+            <button class="co-btn" id="reconnectBtn">立即重连</button>
+        </div>
+    </div>
+
+    <!-- Toast 提示 (P1) -->
+    <div id="appToast"></div>
+
+
     <!-- JavaScript Modules -->
-    <script src="../js/websocket.js?v=3k7"></script>
-    <script src="../js/experiment.js?v=3k7"></script>
-    <script src="../js/chart.js?v=3k7"></script>
-    <script src="../js/packet-flow.js?v=3k7"></script>
-    <script src="../js/cesium-manager.js?v=3k7"></script>
-    <script src="../js/ui-controller.js?v=3k7"></script>
-    <script src="../js/app.js?v=3k7"></script>
+    <script src="../js/config.js?v=3kd"></script>
+    <script src="../js/constants.js?v=3kd"></script>
+    <script src="../js/websocket.js?v=3kd"></script>
+    <script src="../js/experiment.js?v=3kd"></script>
+    <script src="../js/chart.js?v=3kd"></script>
+    <script src="../js/packet-flow.js?v=3kd"></script>
+    <script src="../js/protocol31.js?v=3kd"></script>
+    <script src="../js/cesium-manager.js?v=3kd"></script>
+    <script src="../js/ui-controller.js?v=3kd"></script>
+    <script src="../js/app.js?v=3kd"></script>
 </body>
 </html>

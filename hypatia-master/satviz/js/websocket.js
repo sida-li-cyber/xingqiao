@@ -5,8 +5,9 @@
 
 class WebSocketManager {
     constructor(config = {}) {
-        this.host = config.host || 'localhost';
-        this.port = config.port || 8000;
+        // 默认地址来自 SBConfig（config.js，支持 ?ws=host:port 覆盖）
+        this.host = config.host || (window.SBConfig ? window.SBConfig.host : 'localhost');
+        this.port = config.port || (window.SBConfig ? window.SBConfig.port : 8000);
         this.path = config.path || '/ws/client';
         this.ws = null;
         this.isConnected = false;
@@ -14,10 +15,13 @@ class WebSocketManager {
         this.maxReconnectAttempts = 10;
         this.reconnectDelay = 2000;
         this.messageQueue = [];
+        this.maxQueueSize = 50; // 断线期间指令队列 FIFO 上限，防止无限增长
 
         this.callbacks = {
             onConnect: config.onConnect || (() => {}),
             onDisconnect: config.onDisconnect || (() => {}),
+            // 自动重连耗尽后触发，由 UI 层提示手动重连
+            onReconnectFailed: config.onReconnectFailed || (() => {}),
             onStateUpdate: config.onStateUpdate || (() => {}),
             onSimulationInit: config.onSimulationInit || (() => {}),
             onAck: config.onAck || (() => {}),
@@ -34,7 +38,9 @@ class WebSocketManager {
      */
     connect() {
         try {
-            const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            // 协议优先取 SBConfig（与页面 http/https 一致），其次回退自动判断
+            const protocol = (window.SBConfig && window.SBConfig.wsProtocol) ||
+                (window.location.protocol === 'https:' ? 'wss' : 'ws');
             const url = `${protocol}://${this.host}:${this.port}${this.path}`;
             console.log(`[WebSocket] Connecting to ${url}`);
 
@@ -153,7 +159,19 @@ class WebSocketManager {
             setTimeout(() => this.connect(), delay);
         } else {
             console.error('[WebSocket] Max reconnection attempts reached');
+            this.callbacks.onReconnectFailed();
         }
+    }
+
+    /**
+     * 手动重连：自动重连耗尽后由 UI 遮罩上的按钮触发
+     */
+    manualReconnect() {
+        this.reconnectAttempts = 0;
+        if (this.ws) {
+            try { this.ws.close(); } catch (e) { /* 忽略关闭异常 */ }
+        }
+        this.connect();
     }
 
     /**
@@ -167,6 +185,11 @@ class WebSocketManager {
                 console.error('[WebSocket] Send error:', error);
             }
         } else {
+            if (this.messageQueue.length >= this.maxQueueSize) {
+                // 队列满时丢弃最旧的（过期）指令，保留最新操作意图
+                this.messageQueue.shift();
+                console.warn('[WebSocket] Message queue full, dropped oldest');
+            }
             console.warn('[WebSocket] Not connected, queuing message');
             this.messageQueue.push(message);
         }
@@ -198,34 +221,8 @@ class WebSocketManager {
         this.sendCommand('stop');
     }
 
-    sendResetCommand() {
-        this.sendCommand('reset');
-    }
-
     sendSpeedCommand(speed) {
         this.sendCommand('speed', { multiplier: speed });
-    }
-
-    sendMetricsCommand(metricsType) {
-        this.sendCommand('metrics', { type: metricsType });
-    }
-
-    sendFilterCommand(satellites, stations) {
-        this.sendCommand('filter', {
-            satellites: satellites,
-            stations: stations,
-        });
-    }
-
-    sendScenarioCommand(scenario) {
-        this.sendCommand('scenario', { scenario: scenario });
-    }
-
-    sendConstellationCommand(constellationName, shellIndex) {
-        this.sendCommand('switch_constellation', {
-            constellation: constellationName,
-            shell: shellIndex,
-        });
     }
 
     sendTimelineCommand(timestamp) {

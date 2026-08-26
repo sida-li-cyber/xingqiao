@@ -145,10 +145,14 @@ class CesiumManager {
             islMesh: [],        // Phase 7: static ISL mesh (decorative)
         };
 
-        // Node type metadata
+        // Node type metadata（P3：颜色收敛自 constants.js 的 SBConstants，
+        // 未加载时回退到 Cesium 命名色，保持向后兼容）
+        const sharedNodes = (window.SBConstants && window.SBConstants.NODE_TYPES) || {};
         this.nodeTypes = {
             satellite: {
-                color: Cesium.Color.DODGERBLUE,
+                color: sharedNodes.satellite
+                    ? Cesium.Color.fromCssColorString(sharedNodes.satellite.color)
+                    : Cesium.Color.DODGERBLUE,
                 pixelSize: 5,
                 outlineColor: Cesium.Color.WHITE,
                 outlineWidth: 1,
@@ -156,7 +160,9 @@ class CesiumManager {
                 labelFont: '11px sans-serif',
             },
             uav: {
-                color: Cesium.Color.LIMEGREEN,
+                color: sharedNodes.uav
+                    ? Cesium.Color.fromCssColorString(sharedNodes.uav.color)
+                    : Cesium.Color.LIMEGREEN,
                 pixelSize: 7,
                 outlineColor: Cesium.Color.WHITE,
                 outlineWidth: 1,
@@ -164,7 +170,9 @@ class CesiumManager {
                 labelFont: '11px sans-serif',
             },
             ship: {
-                color: Cesium.Color.ORANGE,
+                color: sharedNodes.ship
+                    ? Cesium.Color.fromCssColorString(sharedNodes.ship.color)
+                    : Cesium.Color.ORANGE,
                 pixelSize: 6,
                 outlineColor: Cesium.Color.WHITE,
                 outlineWidth: 1,
@@ -172,7 +180,9 @@ class CesiumManager {
                 labelFont: '11px sans-serif',
             },
             ground_station: {
-                color: Cesium.Color.ORANGERED,
+                color: sharedNodes.ground_station
+                    ? Cesium.Color.fromCssColorString(sharedNodes.ground_station.color)
+                    : Cesium.Color.ORANGERED,
                 pixelSize: 10,
                 outlineColor: Cesium.Color.WHITE,
                 outlineWidth: 2,
@@ -181,13 +191,12 @@ class CesiumManager {
             },
         };
 
-        // Link type base colors (from protocol v2)
-        this.linkTypeColors = {
-            isl: Cesium.Color.fromCssColorString('#4FC3F7'),
-            gsl: Cesium.Color.fromCssColorString('#FF8A65'),
-            sul: Cesium.Color.fromCssColorString('#81C784'),
-            ssl: Cesium.Color.fromCssColorString('#FFB74D'),
-        };
+        // Link type base colors (from protocol v2，收敛自 SBConstants)
+        this.linkTypeColors = {};
+        const sharedLinks = (window.SBConstants && window.SBConstants.LINK_TYPES) || {};
+        for (const [type, meta] of Object.entries(sharedLinks)) {
+            this.linkTypeColors[type] = Cesium.Color.fromCssColorString(meta.color);
+        }
 
         this.cesiumToken = options.cesiumToken || '';
         this.selectedEntity = null;
@@ -748,6 +757,13 @@ class CesiumManager {
                 const color = this._getLinkDisplayColor(linkType, util, properties);
                 const width = this._getLinkWidth(linkType);
 
+                // P2 优化：每条链路复用固定的 scratch 数组与 Cartesian3，
+                // 消除 positions 回调每帧的新数组/新坐标分配（GC 压力）。
+                // 注意：节点的 CallbackProperty 不会写回调用的 result 参数，
+                // 必须显式 clone 到 scratch，否则 scratch 保持 (0,0,0)（地心），
+                // Cesium 的 extractHeights 会对地心坐标返回 undefined 并崩溃。
+                const posScratch = [new Cesium.Cartesian3(), new Cesium.Cartesian3()];
+
                 const link = this.viewer.entities.add({
                     polyline: {
                         positions: new Cesium.CallbackProperty(() => {
@@ -762,7 +778,9 @@ class CesiumManager {
                                   )
                                 : null;
                             if (!srcPos || !tgtPos) return [];
-                            return [srcPos, tgtPos];
+                            Cesium.Cartesian3.clone(srcPos, posScratch[0]);
+                            Cesium.Cartesian3.clone(tgtPos, posScratch[1]);
+                            return posScratch;
                         }, false),
                         width: width,
                         material: new Cesium.PolylineDashMaterialProperty({
@@ -910,15 +928,21 @@ class CesiumManager {
             const a = this.entities.nodes.get(pair[0]);
             const b = this.entities.nodes.get(pair[1]);
             if (!a || !b) continue;
+            // 每条 mesh 边独立 scratch（各边回调并存，不可共享）；
+            // 同链路：节点 CallbackProperty 不写 result，必须显式 clone。
+            const meshPosScratch = [new Cesium.Cartesian3(), new Cesium.Cartesian3()];
             const ent = this.viewer.entities.add({
                 polyline: {
+                    // P2 优化：同链路 positions，复用 scratch 避免每帧分配
                     positions: new Cesium.CallbackProperty(() => {
                         const pa = a.position
                             ? a.position.getValue(clock.currentTime) : null;
                         const pb = b.position
                             ? b.position.getValue(clock.currentTime) : null;
                         if (!pa || !pb) return [];
-                        return [pa, pb];
+                        Cesium.Cartesian3.clone(pa, meshPosScratch[0]);
+                        Cesium.Cartesian3.clone(pb, meshPosScratch[1]);
+                        return meshPosScratch;
                     }, false),
                     width: 1,
                     material: color,
@@ -1337,7 +1361,14 @@ class CesiumManager {
     }
 
     getStats() {
-        return { ...this.stats };
+        return {
+            ...this.stats,
+            // P2 渲染诊断：实体总数 / 插值段数 / 包流动 overlay 数
+            entities: this.entities.nodes.size + this.entities.links.size
+                + this.entities.islMesh.length,
+            interpSegments: this.nodeInterp.size,
+            flowOverlays: this.packetFlow ? this.packetFlow.overlayCount : 0,
+        };
     }
 }
 

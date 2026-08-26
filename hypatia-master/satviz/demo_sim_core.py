@@ -1246,6 +1246,8 @@ class DemoSimCore:
             "message_type": "state_update",
             "payload": {
                 "timestamp": round(self.sim_time, 2),
+                # 播放状态权威值：前端播放按钮由它驱动，保证多客户端一致
+                "is_playing": self.is_playing,
                 "sat_pos": sat_pos,
                 "positions": dyn_positions,
                 "links": links,
