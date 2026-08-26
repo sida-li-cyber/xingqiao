@@ -203,6 +203,11 @@ class PacketFlowManager {
         this._removeAll();
     }
 
+    /** 当前活跃 overlay 数（供渲染诊断面板使用）。 */
+    get overlayCount() {
+        return this._byLink.size;
+    }
+
     /** Drop the overlay belonging to a single link (called on link removal). */
     dropLink(linkId) {
         const rec = this._byLink.get(linkId);

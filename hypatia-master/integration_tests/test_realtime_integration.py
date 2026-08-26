@@ -396,7 +396,7 @@ async def test_frontend_files_exist():
         "js/cesium-manager.js",
         "js/ui-controller.js",
         "js/websocket.js",
-        "js/hypatia-adapter.js",
+        "js/config.js",
         "demo_sim_core.py",
     ]
     for f in required_files:
@@ -426,6 +426,24 @@ async def main():
         print("  PYTHONPATH=/path/to/hypatia-master:/path/to/realtime_backend python -m realtime_backend.run --port 8000")
         print(f"\nDetails: {e}")
         sys.exit(1)
+
+    # 防污染护栏：本套件会接入 mock 核心并重发 simulation_init，
+    # 若后端已挂真实核心（客户端连接会收到 init 重放），运行将
+    # 覆盖所有在线客户端的场景与后端的 init 缓存。检测到即中止。
+    try:
+        async with websockets.connect(f"{BACKEND_URI}/ws/client") as ws:
+            try:
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2))
+                if msg.get("message_type") == "simulation_init":
+                    print("\nERROR: A live simulation core is already attached to this backend.")
+                    print("Running this v2 suite would overwrite its simulation_init for all")
+                    print("connected clients. Stop the demo core first, or point the suite at")
+                    print("a dedicated backend instance.")
+                    sys.exit(2)
+            except asyncio.TimeoutError:
+                pass  # 无 init 重放 = 无真实核心，安全
+    except Exception:
+        pass
 
     # Run all tests
     await test_frontend_files_exist()

@@ -95,9 +95,10 @@ class LabApp {
     /* ---------------- 连接 ---------------- */
     connect() {
         this.ws = new WebSocketManager({
-            host: (!window.location.hostname || window.location.hostname === 'localhost')
-                ? '127.0.0.1' : window.location.hostname,
-            port: 8000, path: '/ws/client',
+            // 地址来自 SBConfig（config.js，支持 ?ws=host:port 覆盖）
+            host: window.SBConfig ? window.SBConfig.host : '127.0.0.1',
+            port: window.SBConfig ? window.SBConfig.port : 8000,
+            path: '/ws/client',
             onConnect: () => this._setConn(true),
             onDisconnect: () => this._setConn(false),
             onSimulationInit: (payload) => this._init(payload),

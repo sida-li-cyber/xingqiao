@@ -39,11 +39,16 @@ satviz/
 │   ├── top.html                # Legacy template (offline static page gen)
 │   └── bottom.html             # Legacy template (offline static page gen)
 ├── js/                         # Frontend JavaScript modules (NEW)
+│   ├── config.js               # Runtime endpoint config (SBConfig, ?ws=host:port)
+│   ├── constants.js            # Shared link/node type metadata (colors & labels)
 │   ├── app.js                  # Main application orchestrator
 │   ├── cesium-manager.js       # Cesium 3D scene management
 │   ├── ui-controller.js        # UI interactions and controls
 │   ├── websocket.js            # WebSocket client with auto-reconnect
-│   └── hypatia-adapter.js      # Data adapter example
+│   ├── chart.js                # Time-series chart widget
+│   ├── packet-flow.js          # Packet-flow overlay animation
+│   ├── experiment.js           # Teaching-lab entry (links to lab.html)
+│   └── lab.js                  # Teaching experiment page logic (lab.html)
 ├── scripts/                    # Offline visualization generators (Original)
 │   ├── visualize_constellation.py
 │   ├── visualize_path.py
