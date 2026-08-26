@@ -179,6 +179,17 @@ class CesiumManager {
                 labelShow: false,
                 labelFont: '11px sans-serif',
             },
+            // 真实船舶（AIS 回放图层）：青绿色与合成船舶区分
+            real_ship: {
+                color: sharedNodes.real_ship
+                    ? Cesium.Color.fromCssColorString(sharedNodes.real_ship.color)
+                    : Cesium.Color.LIGHTSEAGREEN,
+                pixelSize: 7,
+                outlineColor: Cesium.Color.WHITE,
+                outlineWidth: 1,
+                labelShow: false,
+                labelFont: '11px sans-serif',
+            },
             ground_station: {
                 color: sharedNodes.ground_station
                     ? Cesium.Color.fromCssColorString(sharedNodes.ground_station.color)
@@ -212,6 +223,7 @@ class CesiumManager {
             satellite: true,
             uav: true,
             ship: true,
+            real_ship: true,
             ground_station: true,
         };
 
@@ -227,6 +239,7 @@ class CesiumManager {
             satellites: 0,
             uavs: 0,
             ships: 0,
+            real_ships: 0,
             ground_stations: 0,
             links: 0,
             fps: 0,
@@ -1062,6 +1075,31 @@ class CesiumManager {
             if (entity.properties.type &&
                 entity.properties.type.getValue() === nodeType) {
                 entity.show = visible;
+            }
+        }
+    }
+
+    /**
+     * 移除某一类型的全部节点实体（AIS 图层关闭时清理残留的真实船舶，
+     * 否则它们会以最后已知位置冻结在场景中）。
+     */
+    removeNodesByType(nodeType) {
+        const removed = [];
+        for (const [id, entity] of this.entities.nodes.entries()) {
+            if (entity.properties.type &&
+                entity.properties.type.getValue() === nodeType) {
+                removed.push(id);
+            }
+        }
+        const statKey = nodeType === 'ground_station'
+            ? 'ground_stations'
+            : nodeType + 's';
+        for (const id of removed) {
+            this.viewer.entities.remove(this.entities.nodes.get(id));
+            this.entities.nodes.delete(id);
+            this.nodeInterp.delete(id);
+            if (this.stats[statKey] !== undefined) {
+                this.stats[statKey] = Math.max(0, this.stats[statKey] - 1);
             }
         }
     }

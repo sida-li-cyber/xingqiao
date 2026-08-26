@@ -130,7 +130,27 @@ await manager.broadcast_state(message_data)
 | `satellite` | LEO卫星 | orbit.altitude_km, orbit.inclination_deg | orbit.plane, orbit.index |
 | `uav` | 无人机 | base_alt_m | group, speed_kmh, model |
 | `ship` | 船舶 | route_name 或 route_waypoints | speed_knots, vessel_type |
+| `real_ship` | 真实船舶（AIS 回放图层） | 无（位置由轨迹回放驱动） | mmsi, ship_type, ais_source |
 | `ground_station` | 地面站 | lat, lon | alt, city |
+
+### 真实船舶（AIS）图层元数据
+
+仿真核心启动时若通过 `--ais-file` 加载了 AIS 轨迹（由
+`tools/ais_tools.py` 从 NOAA Marine Cadastre 公开数据转换而来），
+`simulation_init` payload 会额外携带 `ais_layer` 字段：
+
+```json
+"ais_layer": {
+  "enabled": true,
+  "source": "marine_cadastre",
+  "date": "2023-06-15",
+  "ship_count": 20
+}
+```
+
+前端据此回显“真实船舶(AIS)”图层开关；未加载轨迹时该字段省略，
+开关置为禁用。真实船舶节点 ID 前缀为 `RShip-`，与合成船舶
+（`Ship-`）共存；SSL 链路、DES 流量与包级指标对其零改动复用。
 
 ### 设计说明
 
@@ -284,6 +304,7 @@ bandwidth_utilization     →  links.<id>.bandwidth_utilization
 | `filter` | `{"types": [...], "nodes": [...], "exclude": [...]}` | 节点筛选 |
 | `focus` | `{"node_id": "UAV-01"}` | 相机聚焦到指定节点（新增） |
 | `view_preset` | `{"preset": "global"}` | 预设视角：global / south_china / follow（新增） |
+| `set_ais_layer` | `{"enabled": true}` | 运行时开关真实船舶（AIS）图层；关闭后 RShip-* 位置、SSL 链路与 DES 流量随之剥离（未加载轨迹时忽略） |
 
 ---
 
