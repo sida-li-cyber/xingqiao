@@ -28,6 +28,7 @@ This repository is an enhanced fork of the [Hypatia](https://github.com/snkas/hy
 - [docs/file-transfer-design.md](docs/file-transfer-design.md) — 自定义文件传输与实时追踪设计文档（控制面 / 数据面分离）
 - [docs/experiments/](docs/experiments/) — **教学实验指导书 E1–E4**（时延分解 / M/D/1 / 切换丢包 / QoS，含教师速查表）
 - [docs/education-upgrade-plan.md](docs/education-upgrade-plan.md) — 教育化升级计划（一键启动 / 教学实验 / SGP4 真实轨道）
+- [docs/education-assessment-plan.md](docs/education-assessment-plan.md) — 教学平台改进计划（评分闭环 / 身份存档教师端 / ilab-x 国标对接 / E5–E7 新实验，含执行状态与验收记录）
 - [ROADMAP.md](ROADMAP.md) — 系统完善路线图（六阶段，已全部完成）
 
 ## Quick Start (Windows)
@@ -52,10 +53,13 @@ python test_reconnect.py             # 断线重连健壮性（自动起停 back
 cd ../..                             # 回到项目根目录
 python tests/test_file_e2e.py        # 文件传输端到端：上传→传输→下载 SHA-256 一致 + 取消（自起 backend+core，端口 8769）
 python tests/test_orbit.py           # SGP4 轨道模型 O1–O7（复制自 V4 的模块与 V3 核心集成）
-python tests/test_experiments.py     # 教学实验 E1–E4：场景 + 理论对账 + 目录/取消（7 项，秒级）
-python tests/test_milestone_c.py     # 全终端文件传输集成（需运行中的栈：backend :8000 + core）
+python tests/test_experiments.py     # 教学实验 E1–E7：场景 + 理论对账 + 评分闭环 + 种子参数化（24 项）
+python tests/test_edu_api.py         # 教学数据面：登录鉴权/存档/提交批改/成绩册/班级名单/考核（自起 backend，端口 8771）
+python -m pytest tests/test_ilabx.py -q   # ilab-x 国标适配层：getinfo / score_upload / 自检模式（6 项）
+python tests/test_milestone_c.py     # 全终端文件传输集成（需运行中的栈：backend :8000 + core --scale 1584）
+python wsdiag/e2e_experiment.py      # 实验 WS 全链路：E1–E7 + 并发排队（需运行中的栈：backend :8000 + core）
 
-# 或一次跑全部 pytest 单元/对账测试（无需起栈）：
+# 或一次跑全部 pytest 单元/对账测试（无需起栈，61 项）：
 python -m pytest tests/ -q --ignore=tests/test_milestone_c.py
 ```
 

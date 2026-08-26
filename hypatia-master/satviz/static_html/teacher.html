@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星桥教师端 · 成绩册与批改</title>
+<style>
+:root {
+  --bg: #04060c; --bg2: #0a1120; --panel: rgba(13, 21, 38, 0.82);
+  --brd: rgba(120, 150, 190, 0.14); --brd-hi: rgba(56, 189, 248, 0.45);
+  --brand: #38bdf8; --good: #34d399; --warn: #fbbf24; --bad: #f87171;
+  --text: #e6edf7; --dim: #8fa3bd; --faint: #56677e; --radius: 14px;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: linear-gradient(180deg, var(--bg2), var(--bg) 40%);
+  color: var(--text); min-height: 100vh;
+}
+header {
+  display: flex; align-items: center; gap: 14px; height: 64px; padding: 0 26px;
+  background: rgba(5, 9, 18, 0.82); border-bottom: 1px solid var(--brd);
+  position: sticky; top: 0; z-index: 10;
+}
+.logo {
+  width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+  font-size: 18px; color: #06121f;
+  background: linear-gradient(135deg, var(--brand), #818cf8);
+}
+.brand { font-size: 16px; font-weight: 700; }
+.brand em { font-style: normal; font-size: 11px; color: var(--dim); margin-left: 8px; letter-spacing: 2px; }
+.hd-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+main { max-width: 1200px; margin: 0 auto; padding: 24px 26px 60px; }
+.card {
+  background: var(--panel); border: 1px solid var(--brd); border-radius: var(--radius);
+  padding: 18px 22px; margin-bottom: 18px;
+}
+.card h2 { font-size: 14px; letter-spacing: 2px; color: var(--dim); margin-bottom: 14px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+input, select {
+  padding: 8px 12px; font-size: 13px; color: var(--text); border-radius: 9px;
+  background: rgba(143, 163, 189, 0.08); border: 1px solid var(--brd); outline: none;
+}
+input:focus { border-color: var(--brd-hi); }
+.btn {
+  border: none; border-radius: 9px; padding: 9px 18px; font-size: 13px; font-weight: 700;
+  cursor: pointer; color: #04121f; background: linear-gradient(135deg, var(--brand), #67d3fb);
+}
+.btn.ghost { background: rgba(143, 163, 189, 0.08); color: var(--dim); border: 1px solid var(--brd); }
+.btn.ghost:hover { color: var(--text); border-color: var(--brd-hi); }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.stat { padding: 12px 16px; border-radius: 11px; background: rgba(56, 189, 248, 0.05); border: 1px solid var(--brd); }
+.stat b { display: block; font-size: 22px; color: var(--brand); margin-top: 3px; }
+.stat span { font-size: 11.5px; color: var(--dim); }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--faint); font-weight: 600; padding: 8px 10px; border-bottom: 1px solid var(--brd); white-space: nowrap; }
+td { padding: 9px 10px; border-bottom: 1px solid rgba(120, 150, 190, 0.08); font-variant-numeric: tabular-nums; }
+tr:hover td { background: rgba(56, 189, 248, 0.04); }
+.ok { color: var(--good); font-weight: 700; }
+.bad { color: var(--bad); font-weight: 700; }
+.submitted { color: var(--warn); }
+.link { color: var(--brand); cursor: pointer; text-decoration: underline; font-size: 12px; }
+dialog {
+  border: 1px solid var(--brd-hi); border-radius: var(--radius); background: #0d1526;
+  color: var(--text); padding: 22px; max-width: 620px; width: 92%;
+}
+dialog::backdrop { background: rgba(4, 6, 12, 0.72); }
+dialog h3 { font-size: 15px; margin-bottom: 12px; }
+dialog .kv { font-size: 12.5px; color: var(--dim); margin: 4px 0; }
+dialog textarea {
+  width: 100%; margin-top: 10px; padding: 9px 11px; font-size: 13px; color: var(--text);
+  background: rgba(143, 163, 189, 0.07); border: 1px solid var(--brd); border-radius: 9px;
+  resize: vertical; font-family: inherit;
+}
+dialog .row { margin-top: 14px; justify-content: flex-end; }
+.hint { color: var(--faint); font-size: 12px; }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+@media (max-width: 900px) { .two-col { grid-template-columns: 1fr; } }
+.sub-title { font-size: 12.5px; color: var(--brand); margin-bottom: 10px; letter-spacing: 1px; }
+.dist-row { display: grid; grid-template-columns: 64px 1fr 44px; gap: 10px; align-items: center; margin-bottom: 8px; font-size: 12.5px; }
+.dist-row .bar { height: 14px; border-radius: 7px; background: linear-gradient(90deg, var(--brand), #67d3fb); min-width: 2px; transition: width 0.5s; opacity: 0.9; }
+.dist-row .bar.zero { background: rgba(143, 163, 189, 0.15); min-width: 2px; }
+.dist-row .cnt { color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
+.chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  padding: 5px 12px; font-size: 12px; border-radius: 999px; cursor: pointer;
+  color: var(--dim); background: rgba(143, 163, 189, 0.08);
+  border: 1px solid var(--brd); user-select: none; transition: all 0.2s;
+}
+.chip.on { color: #04121f; background: linear-gradient(135deg, var(--brand), #67d3fb); border-color: transparent; font-weight: 700; }
+.col { display: flex; flex-direction: column; }
+.tag {
+  display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 11.5px; font-weight: 700;
+}
+.tag.live { color: var(--good); background: rgba(52, 211, 153, 0.12); }
+.tag.off { color: var(--faint); background: rgba(143, 163, 189, 0.1); }
+.missing { padding: 2px 8px; margin: 2px; border-radius: 6px; font-size: 12px;
+  display: inline-block; color: var(--bad); background: rgba(248, 113, 113, 0.09); }
+#toast {
+  position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%) translateY(20px);
+  padding: 11px 22px; border-radius: 12px; font-size: 13px; font-weight: 600;
+  background: rgba(13, 21, 38, 0.95); border: 1px solid var(--brd-hi);
+  opacity: 0; pointer-events: none; transition: all 0.3s; z-index: 60;
+}
+#toast.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">✦</div>
+  <div class="brand">星桥教师端<em>STARBRIDGE TEACHER</em></div>
+  <div class="hd-right">
+    <span class="hint" id="whoTxt"></span>
+    <a class="btn ghost" style="text-decoration:none" href="lab.html">← 学生实验台</a>
+  </div>
+</header>
+
+<main>
+  <div class="card" id="loginCard">
+    <h2>教师登录</h2>
+    <div class="row">
+      <input id="tId" placeholder="工号" style="width:120px">
+      <input id="tName" placeholder="姓名" style="width:120px">
+      <input id="tCode" type="password" placeholder="教师口令" style="width:140px">
+      <button class="btn" id="tLoginBtn">登录教师端</button>
+      <span class="hint">默认口令 starbridge（可经环境变量 STARBRIDGE_TEACHER_CODE 覆盖）</span>
+    </div>
+  </div>
+
+  <div id="panels" style="display:none">
+    <div class="card">
+      <h2>应用统计（申报佐证）</h2>
+      <div class="stats" id="statGrid"></div>
+    </div>
+
+    <div class="card">
+      <h2>成绩分布与对账误差热点（教学诊断）</h2>
+      <div class="two-col">
+        <div>
+          <div class="sub-title">成绩分布（总评分段人数）</div>
+          <div id="distBars"></div>
+        </div>
+        <div>
+          <div class="sub-title">对账失败热点（实验 × 判据 Top3）</div>
+          <table>
+            <thead><tr><th>实验</th><th>失败次数</th><th>高频判据</th></tr></thead>
+            <tbody id="hotBody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>考核管理（限时 · 固定种子 · 参数冻结）</h2>
+      <div class="row" style="margin-bottom:12px">
+        <input id="exName" placeholder="考核名称（如 期中实测 E1/E2）" style="width:220px">
+        <input id="exDur" type="number" min="5" max="180" value="30" style="width:90px" title="时长（分钟）">
+        <span class="hint">分钟</span>
+        <input id="exSeed" type="number" value="1234" style="width:100px" title="固定随机种子">
+        <span class="hint">种子</span>
+        <span class="hint">实验：</span>
+        <span id="exExpChips" class="chips"></span>
+        <button class="btn" id="exCreateBtn">＋ 创建考核</button>
+      </div>
+      <table>
+        <thead><tr><th>考核</th><th>实验</th><th>时长</th><th>种子</th><th>状态</th><th>操作</th></tr></thead>
+        <tbody id="examBody"></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>班级管理（名单导入 · 缺交统计）</h2>
+      <div class="row" style="margin-bottom:12px">
+        <textarea id="rosterText" rows="4" placeholder="粘贴班级名单：每行一个学号（可带姓名，逗号/空格/Tab 分隔，取首列）&#10;例如：2026001 张三&#10;2026002 李四" style="flex:1;min-width:260px;resize:vertical;font-family:inherit"></textarea>
+        <div class="col">
+          <button class="btn" id="rosterBtn">导入班级名单</button>
+          <button class="btn ghost" id="rosterClearBtn" style="margin-top:8px">清空名单</button>
+        </div>
+      </div>
+      <div id="rosterStats" class="hint">尚未导入名单</div>
+    </div>
+
+    <div class="card">
+      <h2>成绩册（每学生 × 实验取最佳记录）</h2>
+      <div class="row" style="margin-bottom:12px">
+        <select id="expFilter"><option value="">全部实验</option></select>
+        <select id="rosterFilter"><option value="">全部学生</option><option value="roster">仅本班</option></select>
+        <button class="btn ghost" id="refreshBtn">刷新</button>
+        <button class="btn ghost" id="csvBtn">⬇ 导出 CSV</button>
+      </div>
+      <table>
+        <thead><tr>
+          <th>学号</th><th>姓名</th><th>实验</th><th>自动分</th><th>总评</th>
+          <th>对账</th><th>状态</th><th>评语</th><th>操作</th>
+        </tr></thead>
+        <tbody id="gbBody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<dialog id="reviewDlg">
+  <h3 id="rvTitle">批改记录</h3>
+  <div id="rvMeta"></div>
+  <textarea id="rvComment" rows="3" placeholder="评语（学生可见）"></textarea>
+  <div class="row">
+    <span class="hint">主观分（0-100，可留空）</span>
+    <input id="rvScore" type="number" min="0" max="100" step="0.5" style="width:90px">
+    <button class="btn ghost" id="rvCancel">取消</button>
+    <button class="btn" id="rvSave">保存批改</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+}[c]));
+const HOST = (!window.location.hostname || window.location.hostname === 'localhost')
+    ? '127.0.0.1' : window.location.hostname;
+const API = `http://${HOST}:8000/api/edu`;
+let TOKEN = sessionStorage.getItem('starbridge_teacher_token') || '';
+let ROWS = [];
+let ROSTER = [];
+
+async function api(path, opts = {}) {
+    opts.headers = Object.assign(
+        { 'X-Edu-Token': TOKEN, 'Content-Type': 'application/json' },
+        opts.headers || {});
+    const r = await fetch(API + path, opts);
+    if (r.status === 401 || r.status === 403) {
+        toast(r.status === 403 ? '权限不足（需教师身份/口令）' : '登录已失效');
+        TOKEN = ''; sessionStorage.removeItem('starbridge_teacher_token');
+        showLogin(); throw new Error('auth');
+    }
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    return r.json();
+}
+
+function toast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.classList.add('on');
+    clearTimeout(t._tm); t._tm = setTimeout(() => t.classList.remove('on'), 2600);
+}
+
+function showLogin() {
+    document.getElementById('loginCard').style.display = '';
+    document.getElementById('panels').style.display = 'none';
+    document.getElementById('whoTxt').textContent = '';
+}
+function showPanels(user) {
+    document.getElementById('loginCard').style.display = 'none';
+    document.getElementById('panels').style.display = '';
+    document.getElementById('whoTxt').textContent =
+        `教师：${user.name}（${user.student_id}）`;
+}
+
+document.getElementById('tLoginBtn').addEventListener('click', async () => {
+    const sid = document.getElementById('tId').value.trim();
+    const name = document.getElementById('tName').value.trim();
+    const code = document.getElementById('tCode').value;
+    if (!sid || !name) { toast('请填写工号与姓名'); return; }
+    try {
+        const r = await fetch(`${API}/login`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ student_id: sid, name, role: 'teacher',
+                                   teacher_code: code }),
+        });
+        if (!r.ok) { toast('口令错误或登录失败'); return; }
+        const data = await r.json();
+        TOKEN = data.token;
+        sessionStorage.setItem('starbridge_teacher_token', TOKEN);
+        showPanels(data.user);
+        loadAll();
+    } catch (e) { toast('后端未启动或网络错误'); }
+});
+
+async function loadAll() {
+    await Promise.all([loadStats(), loadGradebook(), loadExams(), loadRoster()]);
+}
+
+async function loadStats() {
+    try {
+        const s = await api('/stats');
+        const grid = document.getElementById('statGrid');
+        const items = [
+            ['实验记录总数', s.total_records],
+            ['学生人数', s.total_students],
+            ['累计实验时长', `${Math.round(s.total_duration_s / 60)} 分钟`],
+            ['平均自动分', s.avg_score],
+            ['已提交报告', s.submitted],
+        ];
+        grid.innerHTML = items.map(([k, v]) =>
+            `<div class="stat"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('');
+
+        /* I2 成绩分布：横向条形图 */
+        const dist = s.score_distribution || {};
+        const order = ['90-100', '80-89', '70-79', '60-69', '<60'];
+        const maxN = Math.max(1, ...order.map((k) => dist[k] || 0));
+        document.getElementById('distBars').innerHTML = order.map((k) => {
+            const n = dist[k] || 0;
+            const pct = Math.round(n / maxN * 100);
+            return `<div class="dist-row"><span>${esc(k)}</span>` +
+                `<div class="bar ${n ? '' : 'zero'}" style="width:${pct}%"></div>` +
+                `<span class="cnt">${n}</span></div>`;
+        }).join('');
+
+        /* I2 对账误差热点 */
+        const hot = s.error_hotspots || [];
+        document.getElementById('hotBody').innerHTML = hot.map((h) =>
+            `<tr><td><b>${esc(h.exp_id)}</b></td><td>${h.fail_count}</td>` +
+            `<td>${(h.top_labels || []).map((t) =>
+                `<span class="missing">${esc(t.label)} ×${t.count}</span>`).join(' ')}` +
+            `</td></tr>`).join('') ||
+            '<tr><td colspan="3" class="hint" style="text-align:center;padding:18px">暂无失败判据 —— 对账全部通过</td></tr>';
+    } catch (e) { /* auth toast 已提示 */ }
+}
+
+/* ---------------- 考核管理（I4） ---------------- */
+const EX_CHIPS = {};
+async function loadExams() {
+    try {
+        const { exams } = await api('/exams');
+        /* 实验选择 chips：固定目录 E1-E7 + 现有考试中出现过的 */
+        const exps = [...new Set([
+            'E1', 'E2', 'E3', 'E4', 'E5', 'E6', 'E7',
+            ...exams.flatMap((e) => e.exp_ids || []),
+        ])].sort();
+        const chips = document.getElementById('exExpChips');
+        if (!Object.keys(EX_CHIPS).length) {
+            exps.forEach((e) => { if (!(e in EX_CHIPS)) EX_CHIPS[e] = false; });
+        }
+        chips.innerHTML = Object.keys(EX_CHIPS).sort().map((e) =>
+            `<span class="chip ${EX_CHIPS[e] ? 'on' : ''}" data-exp="${esc(e)}">${esc(e)}</span>`).join('');
+        chips.querySelectorAll('.chip').forEach((el) =>
+            el.addEventListener('click', () => {
+                EX_CHIPS[el.dataset.exp] = !EX_CHIPS[el.dataset.exp];
+                el.classList.toggle('on');
+            }));
+
+        document.getElementById('examBody').innerHTML =
+            exams.slice().reverse().map((e) => `<tr>
+            <td><b>${esc(e.name)}</b></td>
+            <td>${(e.exp_ids || []).join(' / ')}</td>
+            <td>${Math.round(e.duration_s / 60)} 分钟</td>
+            <td>${e.seed}</td>
+            <td><span class="tag ${e.active ? 'live' : 'off'}">${e.active ? '进行中' : '已结束'}</span></td>
+            <td>${e.active
+                ? `<span class="link" data-eid="${esc(e.id)}">结束考核</span>`
+                : '<span class="hint">—</span>'}</td>
+            </tr>`).join('') ||
+            '<tr><td colspan="6" class="hint" style="text-align:center;padding:18px">暂无考核</td></tr>';
+        document.getElementById('examBody').querySelectorAll('.link').forEach((el) =>
+            el.addEventListener('click', async () => {
+                if (!confirm('确定结束该考核？学生端将立即收卷。')) return;
+                try {
+                    await api(`/exams/${el.dataset.eid}/end`, { method: 'POST', body: '{}' });
+                    toast('✔ 考核已结束');
+                    loadExams();
+                } catch (e) { toast('操作失败'); }
+            }));
+    } catch (e) { /* ignore */ }
+}
+
+document.getElementById('exCreateBtn').addEventListener('click', async () => {
+    const name = document.getElementById('exName').value.trim();
+    const exp_ids = Object.keys(EX_CHIPS).filter((e) => EX_CHIPS[e]);
+    const dur = parseFloat(document.getElementById('exDur').value) || 30;
+    const seed = parseInt(document.getElementById('exSeed').value, 10) || 1234;
+    if (!name) { toast('请填写考核名称'); return; }
+    if (!exp_ids.length) { toast('请至少选择一个实验（点击 E1/E2… 徽标）'); return; }
+    try {
+        await api('/exams', { method: 'POST',
+            body: JSON.stringify({ name, exp_ids, duration_min: dur, seed }) });
+        document.getElementById('exName').value = '';
+        Object.keys(EX_CHIPS).forEach((k) => EX_CHIPS[k] = false);
+        toast(`✔ 考核「${name}」已创建，学生端可进入`);
+        loadExams();
+    } catch (e) { toast('创建失败：参数不合法？'); }
+});
+
+/* ---------------- 班级管理（S4） ---------------- */
+async function loadRoster() {
+    try {
+        const data = await api('/roster');
+        ROSTER = data.roster || [];
+        renderRosterStats(data.stats || {});
+    } catch (e) { /* ignore */ }
+}
+
+function renderRosterStats(st) {
+    const el = document.getElementById('rosterStats');
+    if (!st.roster_size) {
+        el.innerHTML = '尚未导入名单';
+        return;
+    }
+    const missing = (st.missing || []).map((m) =>
+        `<span class="missing">${esc(m)}</span>`).join('');
+    el.innerHTML =
+        `<span>名单 <b>${st.roster_size}</b> 人 · 已提交 <b class="ok">${st.submitted}</b>` +
+        ` · 缺交 <b class="bad">${(st.missing || []).length}</b>` +
+        ` · 已交平均分 <b>${st.avg_score}</b></span>` +
+        (missing ? `<div style="margin-top:8px">${missing}</div>` : '');
+}
+
+document.getElementById('rosterBtn').addEventListener('click', async () => {
+    const text = document.getElementById('rosterText').value;
+    try {
+        const { roster } = await api('/roster', { method: 'POST',
+            body: JSON.stringify({ text }) });
+        toast(`✔ 已导入 ${roster.length} 名学生`);
+        loadRoster();
+    } catch (e) { toast('导入失败'); }
+});
+
+document.getElementById('rosterClearBtn').addEventListener('click', async () => {
+    if (!confirm('确定清空班级名单？')) return;
+    try {
+        await api('/roster', { method: 'DELETE' });
+        toast('名单已清空');
+        loadRoster();
+    } catch (e) { toast('操作失败'); }
+});
+
+async function loadGradebook() {
+    try {
+        const data = await api('/gradebook');
+        ROWS = data.rows || [];
+        /* 实验筛选下拉 */
+        const sel = document.getElementById('expFilter');
+        const cur = sel.value;
+        const exps = [...new Set(ROWS.map((r) => r.exp_id))].sort();
+        sel.innerHTML = '<option value="">全部实验</option>' +
+            exps.map((e) => `<option value="${esc(e)}">${esc(e)}</option>`).join('');
+        sel.value = cur;
+        renderRows();
+    } catch (e) { /* ignore */ }
+}
+
+function renderRows() {
+    const f = document.getElementById('expFilter').value;
+    const onlyRoster = document.getElementById('rosterFilter').value === 'roster';
+    const body = document.getElementById('gbBody');
+    const rosterSet = new Set(ROSTER);
+    const rows = ROWS.filter((r) => (!f || r.exp_id === f)
+        && (!onlyRoster || rosterSet.has(r.student_id)));
+    body.innerHTML = rows.map((r) => {
+        const review = r.review || {};
+        return `<tr>
+        <td>${esc(r.student_id)}</td><td>${esc(r.name)}</td>
+        <td>${esc(r.exp_id)} ${esc(r.exp_name || '')}${r.exam_id ? ' <span class="tag live" title="考核模式下产生">考核</span>' : ''}</td>
+        <td>${r.auto_score}</td>
+        <td><b>${r.final_score}</b></td>
+        <td class="${r.all_pass ? 'ok' : 'bad'}">${r.all_pass ? '✔' : '✘'}</td>
+        <td class="${r.status === 'submitted' ? 'submitted' : ''}">${r.status === 'submitted' ? '已提交' : '草稿'}</td>
+        <td>${review.comment ? esc(review.comment) : '<span class="hint">—</span>'}
+            ${review.teacher_score != null ? `<span class="hint">（主观 ${review.teacher_score}）</span>` : ''}</td>
+        <td><span class="link" data-rid="${r.record_id}">批改</span></td>
+        </tr>`;
+    }).join('') || '<tr><td colspan="9" class="hint" style="text-align:center;padding:26px">暂无实验记录</td></tr>';
+    body.querySelectorAll('.link').forEach((el) =>
+        el.addEventListener('click', () => openReview(el.dataset.rid)));
+}
+
+document.getElementById('expFilter').addEventListener('change', renderRows);
+document.getElementById('rosterFilter').addEventListener('change', renderRows);
+document.getElementById('refreshBtn').addEventListener('click', loadAll);
+document.getElementById('csvBtn').addEventListener('click', async () => {
+    try {
+        const r = await fetch(`${API}/gradebook.csv`,
+            { headers: { 'X-Edu-Token': TOKEN } });
+        if (!r.ok) { toast('导出失败'); return; }
+        const blob = await r.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'starbridge_gradebook.csv';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+    } catch (e) { toast('导出失败：后端离线？'); }
+});
+
+/* ---------------- 批改弹窗 ---------------- */
+let RV_ID = '';
+async function openReview(rid) {
+    RV_ID = rid;
+    try {
+        const { record } = await api(`/records/${rid}`);
+        document.getElementById('rvTitle').textContent =
+            `批改：${record.student_id} ${record.name} · ${record.exp_id}`;
+        document.getElementById('rvMeta').innerHTML =
+            `<div class="kv">自动分：${record.score}　对账：${record.all_pass ? '通过' : '未通过'}</div>` +
+            `<div class="kv">结论：${esc(record.conclusion)}</div>` +
+            (Object.keys(record.questions || {}).length
+                ? `<div class="kv">思考题作答：${esc(Object.values(record.questions).join(' | '))}</div>`
+                : '');
+        const rv = record.review || {};
+        document.getElementById('rvComment').value = rv.comment || '';
+        document.getElementById('rvScore').value =
+            rv.teacher_score != null ? rv.teacher_score : '';
+        document.getElementById('reviewDlg').showModal();
+    } catch (e) { /* ignore */ }
+}
+document.getElementById('rvCancel').addEventListener('click', () =>
+    document.getElementById('reviewDlg').close());
+document.getElementById('rvSave').addEventListener('click', async () => {
+    const score = document.getElementById('rvScore').value;
+    try {
+        await api(`/records/${RV_ID}/review`, {
+            method: 'POST',
+            body: JSON.stringify({
+                comment: document.getElementById('rvComment').value,
+                teacher_score: score === '' ? null : parseFloat(score),
+            }),
+        });
+        document.getElementById('reviewDlg').close();
+        toast('✔ 批改已保存');
+        loadAll();
+    } catch (e) { /* toast 已提示 */ }
+});
+
+/* ---------------- 启动 ---------------- */
+(async function boot() {
+    if (!TOKEN) { showLogin(); return; }
+    try {
+        const { user } = await api('/me');
+        if (user.role !== 'teacher') { showLogin(); return; }
+        showPanels(user);
+        loadAll();
+    } catch (e) { showLogin(); }
+})();
+</script>
+</body>
+</html>

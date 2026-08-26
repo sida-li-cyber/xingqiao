@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,8 @@ from fastapi.responses import JSONResponse
 
 from .config import load_settings
 from .core import manager
+from .edu import EduStore
+from .edu_api import init_edu_router, router as edu_router
 from .files import CHUNK_SIZE, FileStore
 from .files_api import init_files_router, router as files_router
 from .schemas import CommandMessage
@@ -29,6 +32,14 @@ settings = load_settings()
 FILE_STORE_DIR = Path(__file__).resolve().parent / "data" / "files"
 file_store = FileStore(FILE_STORE_DIR)
 init_files_router(file_store)
+
+# Education data plane (improvement plan phase 2): lightweight accounts and
+# server-side experiment records (JSON file, no external database).
+EDU_DB_PATH = Path(os.environ.get(
+    "STARBRIDGE_EDU_DB",
+    str(Path(__file__).resolve().parent / "data" / "edu" / "db.json")))
+edu_store = EduStore(EDU_DB_PATH)
+init_edu_router(edu_store)
 
 
 @asynccontextmanager
@@ -62,6 +73,9 @@ app.add_middleware(
 
 # File-transfer data plane endpoints (upload / list / download / delete).
 app.include_router(files_router)
+
+# Education data plane endpoints (login / records / gradebook / stats).
+app.include_router(edu_router)
 
 
 @app.get("/health")
