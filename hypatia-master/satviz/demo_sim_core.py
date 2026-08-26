@@ -663,7 +663,7 @@ class DemoSimCore:
                  sats_per_orbit=12, num_uavs=8, num_ships=10,
                  scale=None, ephemeris="circular", tle_file=None,
                  epoch=None, constellation=None,
-                 ais_file=None, ais_max_ships=20):
+                 ais_file=None, ais_max_ships=50):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
@@ -1879,7 +1879,7 @@ async def main():
     parser.add_argument("--ais-file", default=None, metavar="PATH",
                         help="真实船舶轨迹 JSON（由 tools/ais_tools.py "
                              "convert 生成），启用 AIS 回放图层")
-    parser.add_argument("--ais-max-ships", type=int, default=20,
+    parser.add_argument("--ais-max-ships", type=int, default=50,
                         help="AIS 图层最多回放的真实船舶数")
     args = parser.parse_args()
 

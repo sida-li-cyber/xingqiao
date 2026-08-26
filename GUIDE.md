@@ -445,13 +445,18 @@ SGP4 模块（`ephemeris.py` / `tle_source.py`）复制自 V4，逻辑零改动�
 # 1) 下载 NOAA 每日 AIS 包（约 300+ MB，缓存于 realtime_backend/data/ais/raw/）
 python tools/ais_tools.py fetch --date 2023-06-15
 
-# 2) 筛选转换轨迹 JSON（NOAA 覆盖美洲海域，需用数据覆盖范围内的 bbox；
+# 2) 筛选转换轨迹 JSON（NOAA 仅覆盖美洲海域，bbox 需在数据覆盖范围内；
 #    bbox 不命中时工具会提示实际覆盖范围）
-python tools/ais_tools.py convert --bbox=-76.5,36.0,-70.0,42.0
-#    输出：realtime_backend/data/ais/ships_marine_cadastre.json（20 艘）
+python tools/ais_tools.py convert --bbox=-76.5,36.0,-70.0,42.0 --max-ships 50
 
-# 3) 仿真核心加载轨迹（一键脚本检测到该 JSON 会自动携带此参数）
-python demo_sim_core.py --ais-file realtime_backend/data/ais/ships_marine_cadastre.json
+# 2') 中国近海演示轨迹：NOAA 不覆盖中国海域，用 generate 沿真实航道
+#     （渤海/黄海/东海/台湾海峡/南海）合成可回放轨迹，默认 50 艘
+python tools/ais_tools.py generate --max-ships 50
+#     输出：realtime_backend/data/ais/ships_marine_cadastre.json（50 艘）
+
+# 3) 仿真核心加载轨迹（一键脚本检测到该 JSON 会自动携带
+#    --ais-file 与 --ais-max-ships 50 参数）
+python demo_sim_core.py --ais-file realtime_backend/data/ais/ships_marine_cadastre.json --ais-max-ships 50
 ```
 
 真实船舶节点 ID 前缀 `RShip-`、协议类型 `real_ship`，与合成船舶（`Ship-`）共存；

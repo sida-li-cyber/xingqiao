@@ -96,7 +96,7 @@ REM Real ships (AIS): auto-load the converted tracks JSON when present,
 REM so the frontend's "真实船舶(AIS)" layer lights up without extra flags.
 set AIS_ARGS=
 if exist "realtime_backend\data\ais\ships_marine_cadastre.json" (
-    set "AIS_ARGS=--ais-file "%~dp0realtime_backend\data\ais\ships_marine_cadastre.json""
+    set "AIS_ARGS=--ais-file "%~dp0realtime_backend\data\ais\ships_marine_cadastre.json" --ais-max-ships 50"
     echo [AIS] Real ship tracks found - AIS replay layer enabled.
 )
 

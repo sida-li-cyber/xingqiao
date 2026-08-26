@@ -49,7 +49,7 @@ sleep 3
 # Real ships (AIS): auto-load the converted tracks JSON when present.
 AIS_ARGS=()
 if [ -f realtime_backend/data/ais/ships_marine_cadastre.json ]; then
-    AIS_ARGS=(--ais-file "$ROOT/realtime_backend/data/ais/ships_marine_cadastre.json")
+    AIS_ARGS=(--ais-file "$ROOT/realtime_backend/data/ais/ships_marine_cadastre.json" --ais-max-ships 50)
     echo "[AIS] Real ship tracks found - AIS replay layer enabled."
 fi
 (cd hypatia-master/satviz && "$PY" demo_sim_core.py --port 8000 "${AIS_ARGS[@]}") >> .starbridge.log 2>&1 &
