@@ -227,6 +227,14 @@
         .mode-select option { background: #161b27; }
 
         /* ---------- Time-series chart panel ---------- */
+        /* 拖动上边缘（面板头部）即可移动面板；双击头部恢复联动定位；最近操作的面板置顶 */
+        #layersPanel .panel-header, #statsPanel .panel-header,
+        #chartPanel .panel-header, #filePanel .panel-header,
+        #detailPanel .panel-header { cursor: grab; touch-action: none; user-select: none; }
+        /* 自定义星座面板无 .panel-header，以标题行作拖动手柄 */
+        #constellationPanel .cp-title { cursor: grab; touch-action: none; user-select: none; }
+        .glass.dragging { transition: none; }
+        .glass.dragging .panel-header, .glass.dragging .cp-title { cursor: grabbing; }
         /* 几何约束：时序指标上边缘位于「图层」(#layersPanel) 下边缘下方 14px（--panel-gap），
            且右边缘与图层面板右边缘完全对齐（右侧边界重合）。
            layersPanel 实际高度随内容变化、收起时 display:none，故由页尾 syncPanelGeometry
@@ -809,8 +817,11 @@
             if (!chart || !layers || !file || !stats) return;
             var narrow = window.matchMedia && window.matchMedia(NARROW).matches;
 
-            // 时序指标 ← 图层：top 位于图层下边缘下方 14px，右边缘对齐；图层隐藏时回退 CSS 相对计算
-            if (!narrow && layers.offsetParent !== null) {
+            // 时序指标 ← 图层：top 位于图层下边缘下方 14px，右边缘对齐；图层隐藏时回退 CSS 相对计算；
+            // 自身或参照面板（图层）被用户手动拖动 → 解除联动，保持原位不动；双击头部可恢复
+            if (chart.dataset.userPlaced || layers.dataset.userPlaced) {
+                // 保持当前位置不变（折叠按钮等操作不应重置已冻结的面板）
+            } else if (!narrow && layers.offsetParent !== null) {
                 var lr = layers.getBoundingClientRect();
                 chart.style.top = (lr.bottom + GAP) + 'px';
                 chart.style.right = (window.innerWidth - lr.right) + 'px';
@@ -823,8 +834,11 @@
                 chart.style.bottom = '';
             }
 
-            // 文件传输 ← 统计：top 位于统计下边缘下方 14px，左边缘对齐；统计收起时回退 CSS 相对计算
-            if (!narrow && stats.offsetParent !== null) {
+            // 文件传输 ← 统计：top 位于统计下边缘下方 14px，左边缘对齐；统计收起时回退 CSS 相对计算；
+            // 自身或参照面板（统计）被用户手动拖动 → 解除联动，保持原位不动；双击头部可恢复
+            if (file.dataset.userPlaced || stats.dataset.userPlaced) {
+                // 保持当前位置不变（折叠按钮等操作不应重置已冻结的面板）
+            } else if (!narrow && stats.offsetParent !== null) {
                 var sr = stats.getBoundingClientRect();
                 file.style.top = (sr.bottom + GAP) + 'px';
                 file.style.left = sr.left + 'px';
@@ -850,6 +864,73 @@
                 if (el) ro.observe(el);
             });
         }
+        // ---------- 拖动上边缘移动面板 + 最近使用窗口置顶 ----------
+        function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+        // z-index 推叠机制：任意面板被按下/拖动/双击时提升为当前最高层级，
+        // 保证最近操作的窗口始终浮于其他面板之上，避免被遮挡
+        var TOP_Z = 100;
+        function bringToFront(panel) { panel.style.zIndex = String(++TOP_Z); }
+
+        function makeDraggable(panelId, handleSelector) {
+            var panel = document.getElementById(panelId);
+            if (!panel) return;
+            var handle = panel.querySelector(handleSelector || '.panel-header');
+            if (!handle) return;
+
+            handle.addEventListener('pointerdown', function (e) {
+                if (e.pointerType === 'mouse' && e.button !== 0) return;
+                if (e.target.closest('button')) return; // 折叠按钮不触发拖动；click 事件不受影响
+                var rect = panel.getBoundingClientRect();
+                var dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+                panel.classList.add('dragging');
+                try { handle.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器降级 */ }
+                e.preventDefault();
+
+                function onMove(ev) {
+                    var left = clamp(ev.clientX - dx, 0, Math.max(0, window.innerWidth - rect.width));
+                    var top = clamp(ev.clientY - dy, 0, Math.max(0, window.innerHeight - rect.height));
+                    panel.style.left = left + 'px';
+                    panel.style.top = top + 'px';
+                    panel.style.right = 'auto';
+                    panel.style.bottom = 'auto';
+                    panel.dataset.userPlaced = '1'; // 标记用户定位，几何联动跳过覆写（见 apply）
+                    bringToFront(panel); // 拖动过程中同步提升层级（pointermove）
+                }
+                function onUp(ev) {
+                    panel.classList.remove('dragging');
+                    handle.removeEventListener('pointermove', onMove);
+                    handle.removeEventListener('pointerup', onUp);
+                    handle.removeEventListener('pointercancel', onUp);
+                    try { handle.releasePointerCapture(ev.pointerId); } catch (err) { /* 忽略 */ }
+                }
+                handle.addEventListener('pointermove', onMove);
+                handle.addEventListener('pointerup', onUp);
+                handle.addEventListener('pointercancel', onUp);
+            });
+
+            // 面板内任意按下 / 双击 → 置顶（最近使用的窗口推叠在其他窗口之上）
+            panel.addEventListener('pointerdown', function () { bringToFront(panel); });
+            panel.addEventListener('dblclick', function () { bringToFront(panel); });
+
+            // 双击头部：清除用户定位，恢复对齐/间距联动（重新执行 apply）
+            handle.addEventListener('dblclick', function () {
+                delete panel.dataset.userPlaced;
+                panel.style.top = '';
+                panel.style.left = '';
+                panel.style.right = '';
+                panel.style.bottom = '';
+                apply();
+            });
+        }
+        // 所有玻璃态面板均可拖动；星座面板以 .cp-title 为手柄（内含表单输入，避免整面板拦截）
+        makeDraggable('layersPanel');
+        makeDraggable('statsPanel');
+        makeDraggable('chartPanel');
+        makeDraggable('filePanel');
+        makeDraggable('constellationPanel', '.cp-title');
+        makeDraggable('detailPanel');
+
         apply();
     })();
     </script>
