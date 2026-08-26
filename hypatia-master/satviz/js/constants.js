@@ -23,6 +23,7 @@
             satellite:      { label: '卫星',   color: '#1E90FF' },
             uav:            { label: '无人机', color: '#32CD32' },
             ship:           { label: '船舶',   color: '#FFA500' },
+            real_ship:      { label: '真实船舶(AIS)', color: '#26A69A' },
             ground_station: { label: '地面站', color: '#FF4500' },
         },
     };

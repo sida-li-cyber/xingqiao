@@ -171,7 +171,7 @@ class SatelliteVisualizationApp {
 
         // Parse nodes
         if (payload.nodes) {
-            const nodesByType = { satellite: [], uav: [], ship: [], ground_station: [] };
+            const nodesByType = { satellite: [], uav: [], ship: [], real_ship: [], ground_station: [] };
 
             for (const [nodeId, meta] of Object.entries(payload.nodes)) {
                 this.nodeTypeMap.set(nodeId, meta.type);
@@ -196,9 +196,15 @@ class SatelliteVisualizationApp {
             // Milestone A (C期): fill the file-transfer src/dst selects
             this.ui.populateFileNodes();
 
+            // 真实船舶（AIS）图层：回显开关状态与数据源元数据
+            if (this.ui.applyAisLayerMeta) {
+                this.ui.applyAisLayerMeta(payload.ais_layer);
+            }
+
             console.log(
                 `[App] Nodes registered: ${nodesByType.satellite.length} sat, ` +
                 `${nodesByType.uav.length} uav, ${nodesByType.ship.length} ship, ` +
+                `${nodesByType.real_ship.length} real_ship(AIS), ` +
                 `${nodesByType.ground_station.length} gs`
             );
         }

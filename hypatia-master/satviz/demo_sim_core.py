@@ -36,6 +36,9 @@ except ImportError:
 # Protocol v3 Phase 2: packet-level discrete-event simulation engine
 from packet_sim import PacketEngine, PRIO_HIGH, PRIO_BEST_EFFORT
 
+# 真实船舶图层：AIS 轨迹回放（tools/ais_tools.py 生成的轨迹 JSON）
+from ais_replay import load_ais_tracks
+
 # Phase 8 (v3): pluggable ephemeris providers (circular / SGP4) and TLE
 # tooling, copied verbatim from the v4 research codebase. CircularProvider
 # reproduces the previous inline Keplerian math exactly, so the default
@@ -656,7 +659,8 @@ class DemoSimCore:
     def __init__(self, host="localhost", port=8000, num_orbits=6,
                  sats_per_orbit=12, num_uavs=8, num_ships=10,
                  scale=None, ephemeris="circular", tle_file=None,
-                 epoch=None, constellation=None):
+                 epoch=None, constellation=None,
+                 ais_file=None, ais_max_ships=20):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
@@ -723,6 +727,21 @@ class DemoSimCore:
         self.uavs = create_uav_formation(num_uavs)
         self.ships = create_ships(num_ships)
         self.ground_stations = GROUND_STATIONS
+
+        # 真实船舶图层（AIS 回放）：与合成船舶共存，前端可运行时开关。
+        # RShip- 前缀使 SSL/DES 逻辑经由前缀匹配零改动复用。
+        self.real_ships = []
+        self.ais_meta = None
+        self.real_ship_enabled = False
+        if ais_file:
+            try:
+                self.real_ships, self.ais_meta = load_ais_tracks(
+                    ais_file, max_ships=ais_max_ships)
+                self.real_ship_enabled = bool(self.real_ships)
+                if not self.real_ships:
+                    print(f"  [ais] warning: no usable tracks in {ais_file}")
+            except (OSError, ValueError) as exc:
+                print(f"  [ais] failed to load {ais_file}: {exc}")
 
         # ISL topology: structured plane/index adjacency for Walker shells;
         # geometric nearest-neighbour for unstructured (real TLE) catalogs,
@@ -907,7 +926,8 @@ class DemoSimCore:
         sat_pos = {sid: p for sid, p in positions.items() if sid.startswith("Sat-")}
         gs_pos = {name: (data[0], data[1]) for name, data in self.ground_stations.items()}
         uav_pos = {uid: p for uid, p in positions.items() if uid.startswith("UAV-")}
-        ship_pos = {sid: p for sid, p in positions.items() if sid.startswith("Ship-")}
+        ship_pos = {sid: p for sid, p in positions.items()
+                    if sid.startswith(("Ship-", "RShip-"))}
 
         grid = build_sat_grid(sat_pos)
 
@@ -1038,6 +1058,19 @@ class DemoSimCore:
                 source_sink[ship.id] = nearest[0]
                 flow_rate[ship.id] = SHIP_FLOW_RATE_PPS
                 flow_prio[ship.id] = PRIO_BEST_EFFORT   # ship bulk data
+            # 真实船舶（AIS 回放）：图层开启时位置才会出现在 positions 中，
+            # 因此用 positions.get 过滤即可；流量参数与合成船舶一致。
+            for rship in self.real_ships:
+                rsp = positions.get(rship.id)
+                if not rsp:
+                    continue
+                nearest = min(
+                    gs_items,
+                    key=lambda kv: haversine_km(rsp["lat"], rsp["lon"],
+                                                kv[1][0], kv[1][1]))
+                source_sink[rship.id] = nearest[0]
+                flow_rate[rship.id] = SHIP_FLOW_RATE_PPS
+                flow_prio[rship.id] = PRIO_BEST_EFFORT
         self.engine.sync_flows(source_sink, flow_rate, flow_prio)
 
         # Time discontinuity (seek / stop / reset) => flush transient state.
@@ -1128,6 +1161,16 @@ class DemoSimCore:
                 "speed_knots": round(ship.speed_kmh / 1.852, 1),
             }
 
+        # Real ships (AIS replay layer)
+        for rship in self.real_ships:
+            nodes[rship.id] = {
+                "type": "real_ship",
+                "label": rship.name or f"AIS-{rship.mmsi}",
+                "mmsi": rship.mmsi,
+                "ship_type": rship.ship_type,
+                "ais_source": (self.ais_meta or {}).get("source", "ais"),
+            }
+
         # Ground stations
         for name, (lat, lon, label) in self.ground_stations.items():
             nodes[name] = {
@@ -1171,6 +1214,13 @@ class DemoSimCore:
                 },
                 # 教学实验目录（改进 #2）：前端据此渲染实验卡片
                 "experiments": experiment_catalog(),
+                # 真实船舶（AIS）图层元数据：未加载轨迹时省略该字段
+                **({"ais_layer": {
+                    "enabled": self.real_ship_enabled,
+                    "source": self.ais_meta.get("source"),
+                    "date": self.ais_meta.get("date"),
+                    "ship_count": len(self.real_ships),
+                }} if self.real_ships else {}),
                 "link_types": {
                     "isl": {"label": "星间链路", "color": "#4FC3F7",
                             "capacity_bps": LINK_CAPACITY_BPS["isl"]},
@@ -1235,6 +1285,15 @@ class DemoSimCore:
                 "lat": round(lat, 3), "lon": round(lon, 3),
                 "alt": int(alt), "heading": round(heading, 1),
             }
+
+        # 真实船舶（AIS 回放）：图层关闭时不写入位置，SSL/DES 自动剥离
+        if self.real_ship_enabled:
+            for rship in self.real_ships:
+                lat, lon, alt, heading = rship.get_position(self.sim_time)
+                positions[rship.id] = {
+                    "lat": round(lat, 3), "lon": round(lon, 3),
+                    "alt": int(alt), "heading": round(heading, 1),
+                }
 
         # Update dynamic links + ISL propagation cache (Phase 7: at 1 Hz).
         # Always recompute when time runs backwards (seek / stop / reset).
@@ -1452,6 +1511,19 @@ class DemoSimCore:
         elif action == "experiment_cancel":
             self._experiment_cancel = True
             print("  [experiment] cancel requested")
+        elif action == "set_ais_layer":
+            # 真实船舶图层运行时开关：关闭后下一帧 positions 不再包含
+            # RShip-*，SSL 链路与 DES 流量随之移除（links_removed 自动生效）
+            if not self.real_ships:
+                print("  [ais] ignored: no AIS tracks loaded (--ais-file)")
+            else:
+                self.real_ship_enabled = bool(params.get("enabled", True))
+                if not self.real_ship_enabled:
+                    self._active_ssl = {
+                        (sat, sh) for sat, sh in self._active_ssl
+                        if not sh.startswith("RShip-")}
+                print(f"  [ais] layer {'enabled' if self.real_ship_enabled else 'disabled'}"
+                      f" ({len(self.real_ships)} real ships)")
         elif action == "set_constellation":
             # 可选星座：运行时热切换 Walker-delta 预设或自定义单壳层，
             # 无需重启核心进程。真实 TLE 编目只能在启动时指定。
@@ -1582,6 +1654,9 @@ class DemoSimCore:
         print(f"  Satellites:      {num_sats}")
         print(f"  UAVs:            {num_uavs}")
         print(f"  Ships:           {num_ships}")
+        if self.real_ships:
+            src = (self.ais_meta or {}).get("source", "ais")
+            print(f"  Real ships(AIS): {len(self.real_ships)} [{src}]")
         print(f"  Ground Stations: {num_gs}")
         print(f"  ISL links:       {len(self.isl_links)}")
         print(f"  Constellation:   {self._constellation_name}")
@@ -1721,6 +1796,11 @@ async def main():
     parser.add_argument("--epoch", default=None, metavar="ISO8601",
                         help="Simulation start UTC, e.g. "
                              "2026-01-01T00:00:00 (default: current time)")
+    parser.add_argument("--ais-file", default=None, metavar="PATH",
+                        help="真实船舶轨迹 JSON（由 tools/ais_tools.py "
+                             "convert 生成），启用 AIS 回放图层")
+    parser.add_argument("--ais-max-ships", type=int, default=20,
+                        help="AIS 图层最多回放的真实船舶数")
     args = parser.parse_args()
 
     # celestrak:/url: TLE specs resolve to a local file (cached, with
@@ -1753,6 +1833,8 @@ async def main():
         ephemeris=args.ephemeris,
         tle_file=tle_file,
         epoch=epoch,
+        ais_file=args.ais_file,
+        ais_max_ships=args.ais_max_ships,
     )
     await core.run()
 

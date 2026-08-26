@@ -62,6 +62,7 @@ class UIController {
             satellite:      { label: '卫星',   color: '#1E90FF' },
             uav:            { label: '无人机', color: '#32CD32' },
             ship:           { label: '船舶',   color: '#FFA500' },
+            real_ship:      { label: '真实船舶(AIS)', color: '#26A69A' },
             ground_station: { label: '地面站', color: '#FF4500' },
         });
     }
@@ -115,6 +116,18 @@ class UIController {
         for (const [elId, nodeType] of Object.entries(nodeToggles)) {
             document.getElementById(elId).addEventListener('change', (e) => {
                 this.cesium.setNodeTypeVisibility(nodeType, e.target.checked);
+            });
+        }
+
+        // 真实船舶（AIS）图层：除本地显隐外还要通知仿真核心，
+        // 使 SSL 链路与 DES 流量同步启用/剥离；关闭时清理残留实体。
+        const realShipToggle = document.getElementById('toggleRealShip');
+        if (realShipToggle) {
+            realShipToggle.addEventListener('change', (e) => {
+                const on = e.target.checked;
+                this.cesium.setNodeTypeVisibility('real_ship', on);
+                if (!on) this.cesium.removeNodesByType('real_ship');
+                this.ws.sendCommand('set_ais_layer', { enabled: on });
             });
         }
 
@@ -634,6 +647,8 @@ class UIController {
         document.getElementById('satCount').textContent = stats.satellites || 0;
         document.getElementById('uavCount').textContent = stats.uavs || 0;
         document.getElementById('shipCount').textContent = stats.ships || 0;
+        const realShipEl = document.getElementById('realShipCount');
+        if (realShipEl) realShipEl.textContent = stats.real_ships || 0;
         document.getElementById('staCount').textContent = stats.ground_stations || 0;
         document.getElementById('linkCount').textContent = stats.links || 0;
         document.getElementById('fpsCounter').textContent = (stats.fps || 0) + ' FPS';
@@ -781,7 +796,7 @@ class UIController {
      *  use to jump straight to a satellite. */
     populateFileNodes() {
         const meta = (this.app && this.app.nodeMetadata) || {};
-        const groups = { satellite: [], uav: [], ship: [], ground_station: [] };
+        const groups = { satellite: [], uav: [], ship: [], real_ship: [], ground_station: [] };
         for (const [id, m] of Object.entries(meta)) {
             if (groups[m.type]) groups[m.type].push([id, m]);
         }
@@ -796,8 +811,8 @@ class UIController {
         // Ordered satellite ids for the numeric locate feature.
         this._satList = groups.satellite.map(([id]) => id);
 
-        const typeLabels = { satellite: '卫星', uav: '无人机', ship: '船舶', ground_station: '地面站' };
-        const order = ['satellite', 'uav', 'ship', 'ground_station'];
+        const typeLabels = { satellite: '卫星', uav: '无人机', ship: '船舶', real_ship: '真实船舶(AIS)', ground_station: '地面站' };
+        const order = ['satellite', 'uav', 'ship', 'real_ship', 'ground_station'];
         const build = (sel) => {
             if (!sel) return;
             sel.innerHTML = '';
@@ -1066,6 +1081,26 @@ class UIController {
     populateNodeFilters(nodesByType) {
         // Intentionally empty: per-node filter lists were removed for a
         // cleaner UI. Type-level visibility is handled by the layers panel.
+    }
+
+    /**
+     * 真实船舶（AIS）图层元数据：仿真核心在 simulation_init 中携带
+     * ais_layer 字段时回显开关状态；未加载轨迹时禁用复选框。
+     */
+    applyAisLayerMeta(layer) {
+        const el = document.getElementById('toggleRealShip');
+        if (!el) return;
+        if (!layer || !layer.ship_count) {
+            el.checked = false;
+            el.disabled = true;
+            el.title = '仿真核心未加载 AIS 轨迹（启动时加 --ais-file）';
+            return;
+        }
+        el.disabled = false;
+        el.checked = !!layer.enabled;
+        el.title = `AIS 数据源: ${layer.source || 'ais'}` +
+            (layer.date ? ` (${layer.date})` : '') +
+            ` — ${layer.ship_count} 艘真实船舶`;
     }
 
     /** Cesium token is loaded silently from localStorage (no UI in v3). */
