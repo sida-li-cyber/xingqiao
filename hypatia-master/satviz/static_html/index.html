@@ -235,6 +235,12 @@
         #constellationPanel .cp-title { cursor: grab; touch-action: none; user-select: none; }
         .glass.dragging { transition: none; }
         .glass.dragging .panel-header, .glass.dragging .cp-title { cursor: grabbing; }
+        /* 面板缩放手柄：悬停左/右边缘显示 ew-resize，下边缘显示 ns-resize（手柄由脚本动态注入） */
+        .resize-handle { position: absolute; z-index: 5; touch-action: none; user-select: none; }
+        .resize-handle.rh-left   { top: 0; left: 0;  width: 6px;  height: 100%; cursor: ew-resize; }
+        .resize-handle.rh-right  { top: 0; right: 0; width: 6px;  height: 100%; cursor: ew-resize; }
+        .resize-handle.rh-bottom { left: 0; bottom: 0; width: 100%; height: 6px; cursor: ns-resize; }
+        .glass.resizing { transition: none; }
         /* 几何约束：时序指标上边缘位于「图层」(#layersPanel) 下边缘下方 14px（--panel-gap），
            且右边缘与图层面板右边缘完全对齐（右侧边界重合）。
            layersPanel 实际高度随内容变化、收起时 display:none，故由页尾 syncPanelGeometry
@@ -872,6 +878,18 @@
         var TOP_Z = 100;
         function bringToFront(panel) { panel.style.zIndex = String(++TOP_Z); }
 
+        // 将面板归一化为 left/top 锚定：去除 translateX 居中（如星座面板）、
+        // 将 right/bottom 锚定固化为等效 left/top，避免后续拖动/缩放坐标偏移；返回归一后的矩形
+        function normalizeAnchor(panel) {
+            var rect = panel.getBoundingClientRect();
+            if (getComputedStyle(panel).transform !== 'none') panel.style.transform = 'none';
+            panel.style.left = rect.left + 'px';
+            panel.style.top = rect.top + 'px';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            return panel.getBoundingClientRect();
+        }
+
         function makeDraggable(panelId, handleSelector) {
             var panel = document.getElementById(panelId);
             if (!panel) return;
@@ -881,7 +899,7 @@
             handle.addEventListener('pointerdown', function (e) {
                 if (e.pointerType === 'mouse' && e.button !== 0) return;
                 if (e.target.closest('button')) return; // 折叠按钮不触发拖动；click 事件不受影响
-                var rect = panel.getBoundingClientRect();
+                var rect = normalizeAnchor(panel);
                 var dx = e.clientX - rect.left, dy = e.clientY - rect.top;
                 panel.classList.add('dragging');
                 try { handle.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器降级 */ }
@@ -930,6 +948,72 @@
         makeDraggable('filePanel');
         makeDraggable('constellationPanel', '.cp-title');
         makeDraggable('detailPanel');
+
+        // ---------- 边缘拖动调整窗口尺寸：左/右边缘改宽度，下边缘改高度 ----------
+        var MIN_W = 180, MIN_H = 100; // 最小宽高下限，防止缩到无法操作或内容溢出
+        var RESIZABLE_IDS = ['layersPanel', 'statsPanel', 'chartPanel', 'filePanel', 'constellationPanel', 'detailPanel'];
+
+        function makeResizable(panelId) {
+            var panel = document.getElementById(panelId);
+            if (!panel) return;
+
+            [{ name: 'left', cls: 'rh-left' }, { name: 'right', cls: 'rh-right' }, { name: 'bottom', cls: 'rh-bottom' }]
+            .forEach(function (spec) {
+                var h = document.createElement('div');
+                h.className = 'resize-handle ' + spec.cls;
+                h.title = '拖动调整大小';
+                panel.appendChild(h);
+
+                h.addEventListener('pointerdown', function (e) {
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
+                    e.preventDefault();
+                    var rect = normalizeAnchor(panel);
+                    panel.style.maxWidth = 'none';
+                    panel.style.maxHeight = 'none'; // 解除 CSS 限高/宽，允许按需增大（视口仍作上限）
+                    panel.classList.add('resizing');
+                    try { h.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器降级 */ }
+                    var startX = e.clientX, startY = e.clientY;
+                    var w0 = rect.width, h0 = rect.height, l0 = rect.left, t0 = rect.top, r0 = rect.right;
+                    var pending = null, rafId = 0;
+
+                    function update() {
+                        rafId = 0;
+                        var dx = pending.clientX - startX, dy = pending.clientY - startY;
+                        if (spec.name === 'right') {
+                            // 视口边界保护：右边缘不超出视口右侧；最小宽度限制
+                            panel.style.width = clamp(w0 + dx, MIN_W, window.innerWidth - l0) + 'px';
+                        } else if (spec.name === 'left') {
+                            // 左边缘不超出视口左侧（最大宽度 = 当前右边缘坐标）
+                            var w = clamp(w0 - dx, MIN_W, r0);
+                            panel.style.left = (r0 - w) + 'px';
+                            panel.style.width = w + 'px';
+                        } else {
+                            // 下边缘不超出视口底部；最小高度限制
+                            panel.style.height = clamp(h0 + dy, MIN_H, window.innerHeight - t0) + 'px';
+                        }
+                    }
+                    function onMove(ev) {
+                        pending = ev; // rAF 合帧：每帧最多写一次样式，实时平滑缩放且避免布局抖动
+                        if (!rafId) rafId = requestAnimationFrame(update);
+                    }
+                    function onUp(ev) {
+                        if (rafId) cancelAnimationFrame(rafId);
+                        panel.classList.remove('resizing');
+                        h.removeEventListener('pointermove', onMove);
+                        h.removeEventListener('pointerup', onUp);
+                        h.removeEventListener('pointercancel', onUp);
+                        try { h.releasePointerCapture(ev.pointerId); } catch (err) { /* 忽略 */ }
+                        // 联动兼容：缩放只改尺寸不破边缘约束，释放后重新应用对齐逻辑；
+                        // 被 userPlaced 冻结的面板（自身或参照面板已手动拖动）仍保持原位，尺寸保留
+                        apply();
+                    }
+                    h.addEventListener('pointermove', onMove);
+                    h.addEventListener('pointerup', onUp);
+                    h.addEventListener('pointercancel', onUp);
+                });
+            });
+        }
+        RESIZABLE_IDS.forEach(makeResizable);
 
         apply();
     })();
