@@ -436,6 +436,28 @@ python demo_sim_core.py --ephemeris sgp4 --scale 1584
 决定）；节点 ID 形如 `Sat-STARLINK-3041`。`--epoch` 可指定仿真起始 UTC。
 SGP4 模块（`ephemeris.py` / `tle_source.py`）复制自 V4，逻辑零改动。
 
+### 6.11 真实船舶（AIS 回放）图层
+
+把 NOAA Marine Cadastre 的真实 AIS 轨迹“放进”仿真，前端图层面板的「真实船舶(AIS)」
+开关（青绿色 `#26A69A`）才会点亮；未加载轨迹时该开关置灰禁用。
+
+```bash
+# 1) 下载 NOAA 每日 AIS 包（约 300+ MB，缓存于 realtime_backend/data/ais/raw/）
+python tools/ais_tools.py fetch --date 2023-06-15
+
+# 2) 筛选转换轨迹 JSON（NOAA 覆盖美洲海域，需用数据覆盖范围内的 bbox；
+#    bbox 不命中时工具会提示实际覆盖范围）
+python tools/ais_tools.py convert --bbox=-76.5,36.0,-70.0,42.0
+#    输出：realtime_backend/data/ais/ships_marine_cadastre.json（20 艘）
+
+# 3) 仿真核心加载轨迹（一键脚本检测到该 JSON 会自动携带此参数）
+python demo_sim_core.py --ais-file realtime_backend/data/ais/ships_marine_cadastre.json
+```
+
+真实船舶节点 ID 前缀 `RShip-`、协议类型 `real_ship`，与合成船舶（`Ship-`）共存；
+SSL 链路与 DES 流量零改动复用。开关经 `set_ais_layer` 命令运行时启停，关闭后下一帧起
+`RShip-*` 位置与相关链路自动剥离。离线自检：`python tools/ais_tools.py selftest`。
+
 ---
 
 ## 7. 依赖项详细说明

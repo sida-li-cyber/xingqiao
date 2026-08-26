@@ -92,7 +92,15 @@ echo [4/5] Starting backend / simulation core / frontend ...
 start "StarBridge-Backend" /D "%~dp0" cmd /k %PY% -m realtime_backend.run --port 8000
 ping -n 4 127.0.0.1 >nul
 
-start "StarBridge-Core" /D "%~dp0hypatia-master\satviz" cmd /k %PY% demo_sim_core.py --port 8000
+REM Real ships (AIS): auto-load the converted tracks JSON when present,
+REM so the frontend's "真实船舶(AIS)" layer lights up without extra flags.
+set AIS_ARGS=
+if exist "realtime_backend\data\ais\ships_marine_cadastre.json" (
+    set "AIS_ARGS=--ais-file "%~dp0realtime_backend\data\ais\ships_marine_cadastre.json""
+    echo [AIS] Real ship tracks found - AIS replay layer enabled.
+)
+
+start "StarBridge-Core" /D "%~dp0hypatia-master\satviz" cmd /k %PY% demo_sim_core.py --port 8000 %AIS_ARGS%
 ping -n 3 127.0.0.1 >nul
 
 REM Serve the satviz folder as root: index.html references its scripts as

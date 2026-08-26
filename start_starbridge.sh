@@ -46,7 +46,13 @@ echo "[3/4] Starting backend / core / frontend ..."
 "$PY" -m realtime_backend.run --port 8000 >> .starbridge.log 2>&1 &
 echo $! >> .starbridge.pids
 sleep 3
-(cd hypatia-master/satviz && "$PY" demo_sim_core.py --port 8000) >> .starbridge.log 2>&1 &
+# Real ships (AIS): auto-load the converted tracks JSON when present.
+AIS_ARGS=()
+if [ -f realtime_backend/data/ais/ships_marine_cadastre.json ]; then
+    AIS_ARGS=(--ais-file "$ROOT/realtime_backend/data/ais/ships_marine_cadastre.json")
+    echo "[AIS] Real ship tracks found - AIS replay layer enabled."
+fi
+(cd hypatia-master/satviz && "$PY" demo_sim_core.py --port 8000 "${AIS_ARGS[@]}") >> .starbridge.log 2>&1 &
 echo $! >> .starbridge.pids
 "$PY" -m http.server 8080 --directory hypatia-master/satviz >> .starbridge.log 2>&1 &
 echo $! >> .starbridge.pids
