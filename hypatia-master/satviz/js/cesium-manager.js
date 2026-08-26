@@ -1518,6 +1518,9 @@ class CesiumManager {
             satellites: 0,
             uavs: 0,
             ships: 0,
+            // 真实船舶（AIS）计数键必须保留：addOrUpdateNode 仅在键存在时
+            // 累加，缺失会导致统计面板 realShipCount 恒为 0
+            real_ships: 0,
             ground_stations: 0,
             links: 0,
             fps: this.stats.fps,
