@@ -129,6 +129,8 @@ class SatelliteVisualizationApp {
         this.pendingISLMesh = null;
         this.ui.hideDetail();
         this.ui.resetCharts();
+        // 可选星座：把选择器同步为核心当前生效的星座
+        this.ui.setConstellationEcho(payload.constellation);
 
         // Duration & timeline
         if (payload.duration) {

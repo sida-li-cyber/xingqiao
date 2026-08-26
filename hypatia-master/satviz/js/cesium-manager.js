@@ -268,9 +268,9 @@ class CesiumManager {
                 Cesium.Ion.defaultAccessToken = this.cesiumToken;
             } else {
                 // Token-free mode: skip the default Cesium Ion base layer entirely.
-                // The offline NaturalEarthII basemap added below needs no token.
+                // The Esri World Imagery satellite basemap added below needs no token.
                 console.log('[CesiumManager] No Cesium token configured - '
-                    + 'using token-free offline basemap (NaturalEarthII)');
+                    + 'using token-free satellite basemap (Esri World Imagery)');
             }
 
             this.viewer = new Cesium.Viewer(this.containerId, {
@@ -296,11 +296,20 @@ class CesiumManager {
             this.scene.backgroundColor = Cesium.Color.BLACK;
             this.scene.highDynamicRange = false;
 
-            // Dark-style base map
+            // Satellite-imagery basemap (Esri World Imagery: token-free and
+            // CORS-friendly). The CDN-bundled NaturalEarthII tiles are blocked
+            // by CORS when Cesium itself is loaded cross-origin, which left
+            // the globe a bare blue sphere; the Esri public tile service sends
+            // Access-Control-Allow-Origin: * and needs no key.
             this.viewer.imageryLayers.removeAll();
+            this.scene.globe.baseColor =
+                Cesium.Color.fromCssColorString('#0b1d3a');
             this.viewer.imageryLayers.addImageryProvider(
-                new Cesium.TileMapServiceImageryProvider({
-                    url: Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII'),
+                new Cesium.UrlTemplateImageryProvider({
+                    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/'
+                        + 'World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                    credit: 'Esri World Imagery',
+                    maximumLevel: 17,
                 })
             );
 

@@ -120,6 +120,61 @@ SCALE_PRESETS = {
            "altitude_km": 550.0, "inclination_deg": 53.0},
 }
 
+# --- Selectable constellations (named Walker-delta presets) ---
+# demo72 / demo440 / starlink mirror the --scale presets above; kuiper
+# and telesat reproduce the FCC filing geometries used by the Hypatia
+# paper scripts (main_kuiper_630.py / main_telesat_1015.py). Each entry
+# carries a display label plus a shell list for create_constellation().
+CONSTELLATION_PRESETS = {
+    "demo72": {"label": "演示星座 72 星",
+               "shells": [dict(SCALE_PRESETS[72])]},
+    "demo440": {"label": "演示星座 440 星",
+                "shells": [dict(SCALE_PRESETS[440])]},
+    "starlink": {"label": "Starlink Gen1 壳层1 (1584 星)",
+                 "shells": [dict(SCALE_PRESETS[1584])]},
+    "kuiper": {"label": "Kuiper-630 (1156 星)",
+               "shells": [{"planes": 34, "sats_per_plane": 34,
+                           "altitude_km": 630.0,
+                           "inclination_deg": 51.9}]},
+    "telesat": {"label": "Telesat Lightspeed (351 星)",
+                "shells": [{"planes": 27, "sats_per_plane": 13,
+                            "altitude_km": 1015.0,
+                            "inclination_deg": 98.98}]},
+}
+
+# Legacy --scale values map onto the named presets (backward compat).
+SCALE_TO_CONSTELLATION = {72: "demo72", 440: "demo440", 1584: "starlink"}
+
+
+def validate_custom_shell(spec):
+    """Validate a user-supplied single-shell spec (set_constellation).
+
+    Returns a normalised shell dict for create_constellation(); raises
+    ValueError with a human-readable reason when the spec is invalid.
+    """
+    def _num(key, lo, hi, cast=float):
+        raw = spec.get(key)
+        if raw is None:
+            raise ValueError(f"custom shell missing '{key}'")
+        try:
+            val = cast(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"custom shell '{key}' is not a number")
+        if not (lo <= val <= hi):
+            raise ValueError(
+                f"custom shell '{key}' out of range [{lo}, {hi}]")
+        return val
+
+    planes = int(_num("planes", 1, 80, int))
+    spp = int(_num("sats_per_plane", 1, 40, int))
+    alt = _num("altitude_km", 300.0, 2000.0)
+    inc = _num("inclination_deg", 0.0, 120.0)
+    if planes * spp > 1600:
+        raise ValueError(
+            f"custom shell too large: {planes * spp} sats (max 1600)")
+    return {"planes": planes, "sats_per_plane": spp,
+            "altitude_km": alt, "inclination_deg": inc}
+
 
 # ---------------------------------------------------------------------------
 # Utility
@@ -601,7 +656,7 @@ class DemoSimCore:
     def __init__(self, host="localhost", port=8000, num_orbits=6,
                  sats_per_orbit=12, num_uavs=8, num_ships=10,
                  scale=None, ephemeris="circular", tle_file=None,
-                 epoch=None):
+                 epoch=None, constellation=None):
         self.host = host
         self.port = port
         self.uri = f"ws://{host}:{port}/ws/core"
@@ -620,28 +675,48 @@ class DemoSimCore:
         self.sim_epoch = epoch if epoch is not None else datetime.now(
             timezone.utc)
 
+        # Real TLE catalogs cannot be hot-swapped at runtime.
+        self._tle_catalog = bool(tle_file)
+
         if tle_file:
             # Real TLE catalog overrides the Walker generator entirely.
             self._shells = None
+            self._constellation_name = "tle"
             self.satellites = create_constellation_from_tle(tle_file)
             self.scale = len(self.satellites)
         else:
-            # Phase 7: --scale picks a preset shell list; otherwise the
-            # legacy single-shell generator (identical geometry to v3).
-            if scale is not None:
-                if scale not in SCALE_PRESETS:
+            # Selectable constellations: --constellation picks a named
+            # preset; legacy --scale values map onto the same presets.
+            # Without either, fall back to the single-shell legacy
+            # generator (identical geometry to v3).
+            preset_name = constellation
+            if preset_name is None and scale is not None:
+                if scale not in SCALE_TO_CONSTELLATION:
                     raise ValueError(
                         f"Unknown scale preset {scale}; "
-                        f"choose from {sorted(SCALE_PRESETS)}")
-                self._shells = [dict(SCALE_PRESETS[scale])]
-                self.scale = scale
+                        f"choose from {sorted(SCALE_TO_CONSTELLATION)}")
+                preset_name = SCALE_TO_CONSTELLATION[scale]
+
+            if preset_name is not None:
+                if preset_name not in CONSTELLATION_PRESETS:
+                    raise ValueError(
+                        f"Unknown constellation preset {preset_name}; "
+                        f"choose from {sorted(CONSTELLATION_PRESETS)}")
+                self._shells = [dict(s) for s in
+                                CONSTELLATION_PRESETS[preset_name]["shells"]]
+                self._constellation_name = preset_name
+                self.satellites = create_constellation(shells=self._shells)
+                self.scale = len(self.satellites)
             else:
                 self._shells = None
+                self._constellation_name = (
+                    "demo72" if (num_orbits, sats_per_orbit) == (6, 12)
+                    else "custom")
                 self.scale = num_orbits * sats_per_orbit
 
-            # Create entities
-            self.satellites = create_constellation(
-                num_orbits, sats_per_orbit, shells=self._shells)
+                # Create entities
+                self.satellites = create_constellation(
+                    num_orbits, sats_per_orbit, shells=self._shells)
             if ephemeris == "sgp4":
                 attach_synthetic_sgp4(self.satellites, self.sim_epoch)
 
@@ -1084,6 +1159,16 @@ class DemoSimCore:
                     "isl": "geometric" if self._isl_geometric
                            else "structured",
                 },
+                # 可选星座元数据：前端据此回显星座选择器状态
+                "constellation": {
+                    "name": self._constellation_name,
+                    "label": CONSTELLATION_PRESETS.get(
+                        self._constellation_name, {}).get(
+                        "label", self._constellation_name),
+                    "sat_count": len(self.satellites),
+                    "shells": ([dict(s) for s in self._shells]
+                               if self._shells else []),
+                },
                 # 教学实验目录（改进 #2）：前端据此渲染实验卡片
                 "experiments": experiment_catalog(),
                 "link_types": {
@@ -1367,6 +1452,79 @@ class DemoSimCore:
         elif action == "experiment_cancel":
             self._experiment_cancel = True
             print("  [experiment] cancel requested")
+        elif action == "set_constellation":
+            # 可选星座：运行时热切换 Walker-delta 预设或自定义单壳层，
+            # 无需重启核心进程。真实 TLE 编目只能在启动时指定。
+            if self._tle_catalog:
+                print("  [constellation] ignored: real TLE catalogs are "
+                      "fixed at startup (--tle)")
+                return
+            name = params.get("name")
+            custom = params.get("custom")
+            try:
+                if custom:
+                    shells = [validate_custom_shell(custom)]
+                    name = "custom"
+                else:
+                    if name not in CONSTELLATION_PRESETS:
+                        print(f"  [constellation] unknown preset: {name}")
+                        return
+                    shells = [dict(s) for s in
+                              CONSTELLATION_PRESETS[name]["shells"]]
+            except ValueError as exc:
+                print(f"  [constellation] rejected: {exc}")
+                return
+            self._apply_constellation(shells, name)
+            print(f"  [constellation] switched to {name} "
+                  f"({self.scale} sats, {len(self.isl_links)} ISLs)")
+            # Re-announce the scene so every client rebuilds in place.
+            if self.ws is not None:
+                await self.ws.send(json.dumps(self.get_init_message()))
+
+    def _apply_constellation(self, shells, name):
+        """Hot-swap the constellation without restarting the process.
+
+        Rebuilds satellites / ISL topology and resets all dynamic-link,
+        clock and DES state, mirroring the relevant parts of __init__.
+        The caller must re-send simulation_init afterwards so clients
+        rebuild the scene.
+        """
+        self.satellites = create_constellation(shells=shells)
+        if self.ephemeris_mode == "sgp4":
+            attach_synthetic_sgp4(self.satellites, self.sim_epoch)
+        self._shells = shells
+        self._constellation_name = name
+        self.scale = len(self.satellites)
+
+        # ISL topology (same selection rule as __init__)
+        self._isl_geometric = any(s.shell < 0 for s in self.satellites)
+        if self._isl_geometric:
+            init_pos = {}
+            for sat in self.satellites:
+                lat, lon, alt = sat.get_position(0.0)
+                init_pos[sat.id] = {"lat": lat, "lon": lon, "alt": alt}
+            self.isl_links = self._compute_geometric_isl(init_pos)
+            self.isl_recompute_interval = 60.0
+        else:
+            self.isl_links = self._compute_isl_topology()
+            self.isl_recompute_interval = None
+        self._last_isl_recompute = 0.0
+
+        # Dynamic links, propagation caches and protocol delta state
+        self._active_gsl.clear()
+        self._active_sul.clear()
+        self._active_ssl.clear()
+        self._isl_prop = {}
+        self._last_link_keys = set()
+        self._tick_count = 0
+        self._last_link_update = -1e9
+
+        # Simulation clock + DES engine (fresh queues / flows / files)
+        self.sim_time = 0.0
+        self._des_last_t = 0.0
+        self.is_playing = True
+        self.engine = PacketEngine(
+            seed=42, config={"packet_size_bytes": PACKET_SIZE_BYTES})
 
     async def _experiment_loop(self, exp_id, run_params=None):
         """运行一个教学实验并把进度/结果推入 outbox（主循环转发）。"""
@@ -1426,7 +1584,7 @@ class DemoSimCore:
         print(f"  Ships:           {num_ships}")
         print(f"  Ground Stations: {num_gs}")
         print(f"  ISL links:       {len(self.isl_links)}")
-        print(f"  Scale preset:    {self.scale}")
+        print(f"  Constellation:   {self._constellation_name}")
         print(f"  Ephemeris:       {self.ephemeris_mode}"
               + (f" ({self.tle_source})" if self.tle_source else ""))
         print(f"  Epoch (UTC):     {self.sim_epoch.strftime('%Y-%m-%dT%H:%M:%SZ')}")
@@ -1536,9 +1694,15 @@ async def main():
     parser.add_argument("--sats-per-orbit", type=int, default=12,
                         help="Satellites per orbit")
     parser.add_argument("--scale", type=int, default=None,
-                        choices=sorted(SCALE_PRESETS.keys()),
+                        choices=sorted(SCALE_TO_CONSTELLATION.keys()),
                         help="Constellation size preset (overrides "
-                             "--num-orbits/--sats-per-orbit)")
+                             "--num-orbits/--sats-per-orbit; deprecated, "
+                             "prefer --constellation)")
+    parser.add_argument("--constellation", default=None,
+                        choices=sorted(CONSTELLATION_PRESETS.keys()),
+                        help="Named constellation preset: demo72 / demo440 "
+                             "/ starlink / kuiper / telesat (overrides "
+                             "--scale and --num-orbits/--sats-per-orbit)")
     parser.add_argument("--num-uavs", type=int, default=8,
                         help="Number of UAVs")
     parser.add_argument("--num-ships", type=int, default=10,
@@ -1585,6 +1749,7 @@ async def main():
         num_uavs=args.num_uavs,
         num_ships=args.num_ships,
         scale=args.scale,
+        constellation=args.constellation,
         ephemeris=args.ephemeris,
         tle_file=tle_file,
         epoch=epoch,

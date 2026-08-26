@@ -17,6 +17,15 @@ function _sharedTypeMeta(key, fallback) {
     return (window.SBConstants && window.SBConstants[key]) || fallback;
 }
 
+/** 可选星座预设的展示名（与核心 CONSTELLATION_PRESETS 对齐） */
+const CONSTELLATION_LABELS = {
+    demo72: '演示 72 星',
+    demo440: '演示 440 星',
+    starlink: 'Starlink 1584 星',
+    kuiper: 'Kuiper 1156 星',
+    telesat: 'Telesat 351 星',
+};
+
 class UIController {
     constructor(cesiumManager, websocketManager, app) {
         this.cesium = cesiumManager;
@@ -70,6 +79,20 @@ class UIController {
         document.getElementById('speedSelect').addEventListener('change', (e) => {
             this.setSpeed(parseFloat(e.target.value));
         });
+
+        // 可选星座：预设切换 + 自定义参数面板
+        const constellationSelect = document.getElementById('constellationSelect');
+        if (constellationSelect) {
+            constellationSelect.addEventListener('change', (e) => {
+                this.onConstellationSelect(e.target.value);
+            });
+            document.getElementById('cpApply').addEventListener('click', () => {
+                this.applyCustomConstellation();
+            });
+            document.getElementById('cpCancel').addEventListener('click', () => {
+                this.closeConstellationPanel();
+            });
+        }
 
         // Timeline
         const timelineSlider = document.getElementById('timelineSlider');
@@ -239,6 +262,89 @@ class UIController {
     setSpeed(speed) {
         this.ws.sendSpeedCommand(speed);
         this.cesium.setAnimationSpeed(speed);
+    }
+
+    // ==================================================================
+    // 可选星座（预设切换 + 自定义参数）
+    // ==================================================================
+
+    onConstellationSelect(value) {
+        if (value === 'custom') {
+            // 打开自定义参数面板，点“应用”才真正下发
+            document.getElementById('constellationPanel').style.display = 'flex';
+            return;
+        }
+        this.ws.sendSetConstellation(value);
+        this.showToast(`正在切换星座：${CONSTELLATION_LABELS[value] || value}`, 'info');
+    }
+
+    applyCustomConstellation() {
+        const spec = {
+            planes: parseInt(document.getElementById('cpPlanes').value, 10),
+            sats_per_plane: parseInt(document.getElementById('cpSatsPerPlane').value, 10),
+            altitude_km: parseFloat(document.getElementById('cpAltitude').value),
+            inclination_deg: parseFloat(document.getElementById('cpInclination').value),
+        };
+        for (const v of Object.values(spec)) {
+            if (!Number.isFinite(v)) {
+                this.showToast('自定义星座参数不完整', 'bad');
+                return;
+            }
+        }
+        if (spec.planes * spec.sats_per_plane > 1600) {
+            this.showToast('总星数超过上限 1600，请减小轨道面数或每面星数', 'bad');
+            return;
+        }
+        this.ws.sendSetConstellationCustom(spec);
+        this.closeConstellationPanel(true);
+        this.showToast(
+            `正在切换星座：自定义 ${spec.planes}×${spec.sats_per_plane} ` +
+            `(${spec.planes * spec.sats_per_plane} 星)`, 'info');
+    }
+
+    /** keepActive: 提交后保留 custom 选中态（等待 init 回显） */
+    closeConstellationPanel(keepActive = false) {
+        document.getElementById('constellationPanel').style.display = 'none';
+        const sel = document.getElementById('constellationSelect');
+        if (!keepActive && sel && sel.value === 'custom') {
+            // 取消时回到当前生效星座，避免选择器停留在“自定义…”
+            sel.value = this._activeConstellation || 'demo72';
+        }
+    }
+
+    /**
+     * simulation_init 回显：把选择器同步为核心当前生效的星座，
+     * 并把壳层参数回填自定义表单；非首次 init 时提示切换完成。
+     */
+    setConstellationEcho(constellation) {
+        if (!constellation) return;
+        const sel = document.getElementById('constellationSelect');
+        if (!sel) return;
+        const name = constellation.name || 'custom';
+        if (name !== 'custom' && name !== 'tle') {
+            this._activeConstellation = name;
+        }
+        const hasOption = Array.from(sel.options).some((o) => o.value === name);
+        sel.value = hasOption ? name : 'custom';
+        // 回填壳层参数，方便在现有星座基础上微调
+        const shell = Array.isArray(constellation.shells) &&
+            constellation.shells[0];
+        if (shell) {
+            const fill = (id, v) => {
+                const el = document.getElementById(id);
+                if (el && v != null) el.value = v;
+            };
+            fill('cpPlanes', shell.planes);
+            fill('cpSatsPerPlane', shell.sats_per_plane);
+            fill('cpAltitude', shell.altitude_km);
+            fill('cpInclination', shell.inclination_deg);
+        }
+        if (this._constellationAnnounced) {
+            this.showToast(
+                `星座已就绪：${constellation.label || name} ` +
+                `(${constellation.sat_count || 0} 星)`, 'ok');
+        }
+        this._constellationAnnounced = true;
     }
 
     setTimelineRange(min, max) {

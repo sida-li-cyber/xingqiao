@@ -304,6 +304,17 @@ Primitive API（`PointPrimitiveCollection` / `PolylineCollection`）预研结论
 
 ## 版本历史
 
+### 可选星座（Selectable Constellations）
+- 星座预设：`demo72` / `demo440` / `starlink`（1584 星）/ `kuiper`
+  （34×34，630 km / 51.9°）/ `telesat`（27×13，1015 km / 98.98°），
+  CLI `--constellation` 指定；旧 `--scale 72|440|1584` 保持兼容
+- 运行时热切换：前端播放栏新增星座下拉框（含自定义 Walker-δ 单壳层
+  参数表单），经 `set_constellation` 命令原地重建星座并重发
+  `simulation_init`，无需重启核心；TLE 模式下该命令被忽略
+- `simulation_init` 新增 `constellation` 字段（name/label/sat_count/shells），
+  前端据此回显选择器状态并回填自定义参数
+- 新增 `tests/test_constellation.py`（预设参数 / 热切换 / 非法参数拒绝，10 例）
+
 ### 前端改进批次（P0–P3）
 - **P0**：修复 renderFileList XSS（转义文件名）；多客户端播放状态同步
   （核心下发 `is_playing`，按钮由权威状态驱动）；详情/统计面板重叠修复；

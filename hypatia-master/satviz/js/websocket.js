@@ -230,6 +230,20 @@ class WebSocketManager {
     }
 
     /**
+     * 可选星座：按预设名切换（demo72/demo440/starlink/kuiper/telesat）
+     */
+    sendSetConstellation(name) {
+        this.sendCommand('set_constellation', { name: name });
+    }
+
+    /**
+     * 可选星座：自定义单壳层参数（planes/sats_per_plane/altitude_km/inclination_deg）
+     */
+    sendSetConstellationCustom(spec) {
+        this.sendCommand('set_constellation', { custom: spec });
+    }
+
+    /**
      * Disconnect WebSocket
      */
     disconnect() {

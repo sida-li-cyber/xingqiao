@@ -38,6 +38,9 @@
         /* Hide Cesium default credit container clutter */
         .cesium-viewer-bottom { display: none; }
 
+        /* Cesium 自带工具条（home/全屏）紧邻右上“已连接”徽章左侧，避免重叠 */
+        .cesium-viewer-toolbar { top: 14px; right: 110px; }
+
         /* ---------- Glass panel base ---------- */
         .glass {
             position: absolute;
@@ -56,7 +59,8 @@
             position: absolute;
             top: 14px; left: 14px; right: 14px;
             display: flex;
-            justify-content: space-between;
+            justify-content: flex-start;
+            gap: 10px;
             align-items: center;
             z-index: 20;
             pointer-events: none;
@@ -79,6 +83,7 @@
             margin-left: 8px;
         }
         #connChip {
+            margin-left: auto;
             pointer-events: auto;
             background: var(--bg-glass);
             border: 1px solid var(--border);
@@ -103,8 +108,19 @@
             overflow: hidden;
             transition: transform 0.28s cubic-bezier(.4,0,.2,1), opacity 0.28s;
         }
-        #layersPanel { left: 14px; top: 70px; }
-        #statsPanel  { right: 14px; top: 70px; }
+        /* 左/右列面板限高 + 内部滚动，保证任意视屏高度下上下不重叠 */
+        #layersPanel {
+            left: 14px; top: 70px;
+            max-height: calc(100vh - 380px);
+            display: flex; flex-direction: column;
+        }
+        #layersPanel .panel-body { overflow-y: auto; min-height: 0; }
+        #statsPanel  {
+            right: 14px; top: 70px;
+            max-height: 42vh;
+            display: flex; flex-direction: column;
+        }
+        #statsPanel .panel-body { overflow-y: auto; min-height: 0; }
         #detailPanel { right: 14px; top: 70px; width: 280px; display: none; }
 
         .panel-header {
@@ -213,7 +229,7 @@
         /* ---------- Time-series chart panel ---------- */
         #chartPanel { left: 14px; bottom: 22px; width: 250px; }
         #chartReopen { left: 14px; bottom: 22px; top: auto; }
-        .chart-block { margin-bottom: 9px; }
+        .chart-block { margin-bottom: 7px; }
         .chart-block:last-child { margin-bottom: 0; }
         .chart-title {
             font-size: 10.5px;
@@ -223,7 +239,7 @@
         }
         .ts-chart {
             width: 100%;
-            height: 56px;
+            height: 48px;
             display: block;
             background: rgba(0,0,0,0.28);
             border-radius: 6px;
@@ -329,7 +345,7 @@
             background: var(--accent); border: none; cursor: pointer;
         }
 
-        #speedSelect {
+        #speedSelect, #constellationSelect {
             background: rgba(255,255,255,0.1);
             color: var(--text);
             border: 1px solid var(--border);
@@ -339,12 +355,48 @@
             cursor: pointer;
             flex-shrink: 0;
         }
-        #speedSelect option { background: #161b27; }
+        #speedSelect option, #constellationSelect option { background: #161b27; }
+        #constellationSelect { max-width: 168px; }
+
+        /* ---------- Custom constellation panel (可选星座) ---------- */
+        #constellationPanel {
+            left: 50%;
+            transform: translateX(-50%);
+            bottom: 84px;
+            width: 320px;
+            padding: 12px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 60;
+        }
+        #constellationPanel .cp-title { font-size: 13px; font-weight: 600; }
+        #constellationPanel .cp-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+        }
+        #constellationPanel label {
+            display: flex; flex-direction: column; gap: 4px;
+            font-size: 11px; color: var(--text-dim);
+        }
+        #constellationPanel input {
+            background: rgba(255,255,255,0.08);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            padding: 5px 7px;
+            font-size: 12px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        #constellationPanel .cp-hint { font-size: 11px; color: var(--text-dim); }
+        #constellationPanel .cp-actions {
+            display: flex; gap: 8px; justify-content: flex-end;
+        }
 
         /* ---------- File transfer panel (Milestone A, C期) ---------- */
-        #filePanel { right: 14px; top: 372px; width: 300px; max-height: calc(100vh - 470px); display: flex; flex-direction: column; }
-        #filePanel .panel-body { overflow-y: auto; }
-        #fileReopen { right: 14px; top: 372px; }
+        #filePanel { right: 14px; top: calc(70px + 42vh + 12px); width: 300px; max-height: calc(58vh - 104px); display: flex; flex-direction: column; }
+        #filePanel .panel-body { overflow-y: auto; min-height: 0; }
+        #fileReopen { right: 14px; top: calc(70px + 42vh + 12px); }
         .file-form { display: flex; flex-direction: column; gap: 7px; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
         .file-form .f-row { display: flex; gap: 7px; }
         .file-form .f-field { flex: 1; display: flex; flex-direction: column; gap: 3px; }
@@ -415,6 +467,7 @@
 
         /* ---------- Experiment lab entry (改进 #2，跳转 lab.html) ---------- */
         #expBtn {
+            position: static; /* 覆盖 .glass 的 absolute，回归顶栏 flex 流 */
             pointer-events: auto;
             border: 1px solid rgba(56,189,248,0.55);
             background: rgba(56,189,248,0.16);
@@ -669,6 +722,30 @@
             <option value="5">5x</option>
             <option value="10">10x</option>
         </select>
+        <select id="constellationSelect" title="选择星座（切换后自动重建场景）">
+            <option value="demo72" selected>演示 72 星</option>
+            <option value="demo440">演示 440 星</option>
+            <option value="starlink">Starlink 1584 星</option>
+            <option value="kuiper">Kuiper 1156 星</option>
+            <option value="telesat">Telesat 351 星</option>
+            <option value="custom">自定义…</option>
+        </select>
+    </div>
+
+    <!-- Custom constellation parameters (可选星座) -->
+    <div id="constellationPanel" class="glass" style="display:none;">
+        <div class="cp-title">自定义星座（Walker-δ 单壳层）</div>
+        <div class="cp-grid">
+            <label>轨道面数 <input type="number" id="cpPlanes" min="1" max="80" value="12"></label>
+            <label>每面星数 <input type="number" id="cpSatsPerPlane" min="1" max="40" value="12"></label>
+            <label>高度 (km) <input type="number" id="cpAltitude" min="300" max="2000" step="10" value="550"></label>
+            <label>倾角 (°) <input type="number" id="cpInclination" min="0" max="120" step="0.1" value="53"></label>
+        </div>
+        <div class="cp-hint">总星数上限 1600；应用后仿真时间归零并重建场景</div>
+        <div class="cp-actions">
+            <button class="pb-btn primary" id="cpApply">应用</button>
+            <button class="pb-btn" id="cpCancel">取消</button>
+        </div>
     </div>
 
     <!-- Hint toast -->
