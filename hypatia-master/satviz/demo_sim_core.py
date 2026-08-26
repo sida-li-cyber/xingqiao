@@ -1564,28 +1564,6 @@ class DemoSimCore:
             for rid in targets:
                 self._experiment_cancels[rid] = True
             print(f"  [experiment] cancel requested: {targets or 'none'}")
-
-    def _experiment_start(self, exp_id, run_params, run_id):
-        """启动一个实验任务（并发上限内）。"""
-        self._experiment_cancels[run_id] = False
-        self._experiment_runs[run_id] = (
-            asyncio.get_event_loop().create_task(
-                self._experiment_loop(exp_id, run_params, run_id)))
-
-    def _pump_experiment_queue(self):
-        """并发空位出现时按 FIFO 启动排队实验（S5）。"""
-        self._experiment_runs = {
-            rid: t for rid, t in self._experiment_runs.items()
-            if not t.done()}
-        while (self._experiment_queue
-               and len(self._experiment_runs) < MAX_CONCURRENT_EXPERIMENTS):
-            item = self._experiment_queue.pop(0)
-            self._experiment_start(item["exp_id"], item["params"],
-                                   item["run_id"])
-            print(f"  [experiment] run (dequeued): {item['run_id']}")
-
-    async def _experiment_loop(self, exp_id, run_params=None, run_id=""):
-
         elif action == "set_ais_layer":
             # 真实船舶图层运行时开关：关闭后下一帧 positions 不再包含
             # RShip-*，SSL 链路与 DES 流量随之移除（links_removed 自动生效）
@@ -1627,6 +1605,25 @@ class DemoSimCore:
             # Re-announce the scene so every client rebuilds in place.
             if self.ws is not None:
                 await self.ws.send(json.dumps(self.get_init_message()))
+
+    def _experiment_start(self, exp_id, run_params, run_id):
+        """启动一个实验任务（并发上限内）。"""
+        self._experiment_cancels[run_id] = False
+        self._experiment_runs[run_id] = (
+            asyncio.get_event_loop().create_task(
+                self._experiment_loop(exp_id, run_params, run_id)))
+
+    def _pump_experiment_queue(self):
+        """并发空位出现时按 FIFO 启动排队实验（S5）。"""
+        self._experiment_runs = {
+            rid: t for rid, t in self._experiment_runs.items()
+            if not t.done()}
+        while (self._experiment_queue
+               and len(self._experiment_runs) < MAX_CONCURRENT_EXPERIMENTS):
+            item = self._experiment_queue.pop(0)
+            self._experiment_start(item["exp_id"], item["params"],
+                                   item["run_id"])
+            print(f"  [experiment] run (dequeued): {item['run_id']}")
 
     def _apply_constellation(self, shells, name):
         """Hot-swap the constellation without restarting the process.
@@ -1673,7 +1670,7 @@ class DemoSimCore:
         self.engine = PacketEngine(
             seed=42, config={"packet_size_bytes": PACKET_SIZE_BYTES})
 
-    async def _experiment_loop(self, exp_id, run_params=None):
+    async def _experiment_loop(self, exp_id, run_params=None, run_id=""):
         """运行一个教学实验并把进度/结果推入 outbox（主循环转发）。"""
         def on_progress(update):
             self._experiment_outbox.append({
