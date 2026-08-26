@@ -32,12 +32,11 @@ async def recv_until(ws, want_status, exp_id, timeout=60.0):
             continue
         if p["status"] == want_status:
             return p
-        # 目标实验先进入了其它终止状态：取消竞赛失败属正常（实验太快），
-        # 其余情况视为失败。
-        if p["status"] in terminal and want_status not in terminal:
+        # 实验一旦进入任一终止状态（done/cancelled/error）即返回，
+        # 由调用方判定是否符合预期；否则取消路径会因广播帧持续到达
+        # 而永远等不到 wanted 状态（recv 每次都有帧刷新，永不超时）。
+        if p["status"] in terminal:
             return p
-        if p["status"] == "error":
-            raise AssertionError(f"experiment error: {p.get('error')}")
 
 
 async def main():
