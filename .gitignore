@@ -25,7 +25,11 @@ Thumbs.db
 hypatia-master/satviz/viz_output/
 
 # Backend file-transfer data plane (runtime uploads / reassembly)
-realtime_backend/data/
+# 保留演示用 AIS 船舶轨迹数据入库（generate 可再生，入库让同伴免操作）
+realtime_backend/data/*
+!realtime_backend/data/ais/
+realtime_backend/data/ais/*
+!realtime_backend/data/ais/ships_marine_cadastre.json
 
 # Runtime logs & temp diagnostics
 *.log
