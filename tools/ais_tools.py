@@ -12,10 +12,15 @@
     # 1) 下载某一天的原始数据（约 300 MB）
     python tools/ais_tools.py fetch --date 2023-06-15
 
-    # 2) 转换为紧凑轨迹 JSON（按区域/船数筛选）
-    python tools/ais_tools.py convert --bbox 105,5,125,25 --max-ships 20
+    # 2) 转换为紧凑轨迹 JSON（按区域/船数筛选；
+    #    默认 bbox 覆盖中国近海：渤海/黄海/东海/台湾海峡/南海）
+    python tools/ais_tools.py convert --bbox 105,3,130,41 --max-ships 50
 
-    # 3) 离线自检（不依赖网络，用内置最小样例验证转换管线）
+    # 3) 合成中国近海演示轨迹（NOAA 仅覆盖美洲海域，中国海域无原始包时
+    #    用该命令沿真实航道合成可回放轨迹，输出 schema 与 convert 一致）
+    python tools/ais_tools.py generate --max-ships 50
+
+    # 4) 离线自检（不依赖网络，用内置最小样例验证转换管线）
     python tools/ais_tools.py selftest
 
 输出 JSON 结构（供 hypatia-master/satviz/ais_replay.py 回放）：
@@ -36,7 +41,9 @@ import argparse
 import csv
 import io
 import json
+import math
 import os
+import random
 import sys
 import urllib.request
 import zipfile
@@ -50,10 +57,12 @@ RAW_DIR = os.path.join(AIS_DIR, "raw")
 NOAA_URL_TEMPLATE = ("https://coast.noaa.gov/htdata/CMSP/AISDataHandler/"
                      "{year}/AIS_{y:04d}_{m:02d}_{d:02d}.zip")
 
-# 演示航线区域（南海）的默认筛选框；NOAA 数据覆盖美国海域，
-# 若该框内无船只，convert 会自动放宽并提示实际覆盖范围。
-DEFAULT_BBOX = (105.0, 5.0, 125.0, 25.0)   # lon_min, lat_min, lon_max, lat_max
-DEFAULT_MAX_SHIPS = 20
+# 默认筛选框：中国近海及主要航运区域
+# （渤海、黄海、东海、台湾海峡、南海）。注意 NOAA 数据仅覆盖美洲海域，
+# 中国海域请用 generate 合成演示轨迹；convert 的 bbox 不命中时
+# 会提示数据实际覆盖范围。
+DEFAULT_BBOX = (105.0, 3.0, 130.0, 41.0)   # lon_min, lat_min, lon_max, lat_max
+DEFAULT_MAX_SHIPS = 50
 DEFAULT_MIN_POINTS = 30
 DEFAULT_MAX_GAP_S = 3600.0
 SOG_MOVING_MIN = 1.0      # 节：低于该航速视为锚泊/系泊，排序时降权
@@ -306,6 +315,175 @@ def cmd_convert(args):
 
 
 # ---------------------------------------------------------------------------
+# generate：中国近海演示轨迹合成
+# ---------------------------------------------------------------------------
+# NOAA Marine Cadastre 仅覆盖美洲海域；为点亮中国近海展示，该命令沿
+# 中国近海主要航道合成符合 convert 输出 schema 的可回放轨迹。
+# 数据仅供演示/教学，source 字段标注为 synthetic。
+
+# 中国近海主要航道（(lat, lon) 航点序列）
+CHINA_ROUTES = [
+    # 天津 - 青岛（渤海/黄海沿岸南下）
+    [(38.9, 118.0), (38.3, 118.7), (37.6, 119.4), (36.9, 120.0), (36.1, 120.4)],
+    # 大连 - 烟台（渤海海峡渡轮）
+    [(38.9, 121.6), (38.5, 121.2), (38.0, 120.9), (37.6, 121.4)],
+    # 黄海南部 - 长江口（沿岸航线）
+    [(36.0, 120.6), (34.5, 120.1), (33.0, 120.6), (31.8, 121.6), (31.0, 122.0)],
+    # 上海/宁波外海（东海沿岸航线）
+    [(31.0, 122.2), (30.0, 122.4), (29.0, 122.2), (28.0, 121.8)],
+    # 东海干线（经宫古海峡方向）
+    [(28.5, 122.0), (27.5, 123.5), (26.8, 125.0), (26.2, 126.5)],
+    # 台湾海峡南北向干线（近岸侧）
+    [(24.0, 118.2), (25.0, 119.0), (26.0, 119.8), (27.0, 120.5), (28.0, 121.2)],
+    # 台湾海峡南北向干线（外侧）
+    [(23.2, 117.2), (24.4, 118.0), (25.6, 118.8), (26.8, 119.6), (27.8, 120.3)],
+    # 粤东 - 厦门 - 福州（沿岸航线）
+    [(22.3, 115.0), (23.0, 116.2), (23.8, 117.2), (24.4, 118.1), (25.4, 119.2)],
+    # 珠江口 - 香港/深圳
+    [(21.8, 113.4), (22.1, 113.8), (22.3, 114.1), (22.5, 114.4), (22.8, 114.8)],
+    # 香港 - 海南西部（南海北部干线）
+    [(22.0, 114.2), (21.5, 112.5), (21.0, 111.0), (20.3, 110.6), (19.8, 110.3),
+     (19.0, 109.8), (18.3, 109.5)],
+    # 北部湾（琼州海峡 - 钦州/防城港）
+    [(20.1, 110.4), (20.3, 109.6), (20.8, 109.0), (21.5, 108.5), (21.7, 108.3)],
+    # 南海南下干线（向马六甲海峡方向）
+    [(21.0, 111.5), (19.0, 110.8), (17.0, 110.5), (15.0, 110.8), (13.0, 111.5),
+     (11.0, 112.5), (9.0, 113.0)],
+]
+
+# 演示船名池（船名, AIS ShipType）：货船 70-74 / 油轮 80-84 / 客船 60-69
+_DEMO_SHIP_POOL = [
+    ("COSCO SHIPPING TAURUS", 70), ("COSCO SHIPPING DENALI", 70),
+    ("COSCO SHIPPING PISCES", 71), ("EVER LUCENT", 70), ("EVER LOTUS", 70),
+    ("MSC AURORA", 71), ("PACIFIC PIONEER", 70), ("GOLDEN BRIDGE", 72),
+    ("ORIENTAL PEARL", 71), ("ZHONG GUANG ZHOU", 70),
+    ("XIN HAI TONG 168", 70), ("HAI LI 8", 70), ("MIN DONG HUO 0168", 70),
+    ("YUE ZHAN JIANG HUO 9898", 70), ("ZHE NING HAI 66", 70),
+    ("SHANDONG XIN HAI", 72), ("CHANG HANG HAI 9", 70), ("JI SU 12", 70),
+    ("HAI SHUN 16", 72), ("HAI FENG 666", 70), ("XIN HAI HUI 88", 70),
+    ("SHEN HAI 168", 70), ("ZHE DAI ZHOU HUO 0088", 70),
+    ("GUANG ZHOU HUO 1234", 70), ("YUAN WANG HUO 68", 72),
+    ("WAN HAI 501", 71), ("SITC INCHON", 71), ("NEWNEW SHIPPING", 73),
+    ("HAI XIN 66", 73), ("LU SHAN HAI 18", 74), ("DONG FANG HAI 66", 74),
+    ("MING HUA 128", 74), ("TONG HAI 8", 73), ("YUE HAI 668", 74),
+    ("DA QING 45", 80), ("ZHONG HAI YOU 368", 80), ("HAI HUI 668", 81),
+    ("GOLDEN CROWN", 80), ("OCEAN GLORY", 80), ("NEW PIONEER", 81),
+    ("ZHONG HUA YOU 9", 80), ("HAI HUA 88", 82), ("SHUN XIN 168", 81),
+    ("KUN LUN SHAN", 84),
+    ("BO HAI CUI ZHU", 60), ("BO HAI MA ZHU", 60), ("ZHONG YU 8", 60),
+    ("YONG XING DAO", 60), ("CHANG DA LONG DAO", 60),
+    ("HAI XIA 1", 60), ("HAI XIA 3", 60), ("PU TAO DAO", 60),
+]
+
+_M_PER_NM = 1852.0
+
+
+def _seg_m(p, q):
+    """等距近似下两 (lat, lon) 点的距离(米)与东/北分量。"""
+    cos_lat = math.cos(math.radians((p[0] + q[0]) / 2))
+    dy = (q[0] - p[0]) * 111320.0
+    dx = (q[1] - p[1]) * 111320.0 * cos_lat
+    return math.hypot(dx, dy), dx, dy
+
+
+def _build_route_m(route):
+    """折线 -> [(cum_a, cum_b, p, q, dx, dy), ...] 与总长(米)。"""
+    segs = []
+    cum = 0.0
+    for p, q in zip(route, route[1:]):
+        length, dx, dy = _seg_m(p, q)
+        segs.append((cum, cum + length, p, q, dx, dy))
+        cum += length
+    return segs, cum
+
+
+def _point_at(segs, total, s):
+    """弧长 s 处的 ((lat, lon), 航向 cog)。"""
+    s = min(max(s, 0.0), total)
+    for a, b, p, q, dx, dy in segs:
+        if s <= b:
+            f = (s - a) / (b - a) if b > a else 0.0
+            return ((p[0] + f * (q[0] - p[0]), p[1] + f * (q[1] - p[1])),
+                    math.degrees(math.atan2(dx, dy)) % 360.0)
+    _a, _b, _p, q, dx, dy = segs[-1]
+    return q, math.degrees(math.atan2(dx, dy)) % 360.0
+
+
+def generate_tracks(out_path, bbox, max_ships, duration_s=7200.0,
+                    dt_s=120.0, seed=20260827):
+    """沿 CHINA_ROUTES 合成 max_ships 艘演示船轨迹，写出 convert 同构 JSON。"""
+    rng = random.Random(seed)
+    pool = list(_DEMO_SHIP_POOL)
+    rng.shuffle(pool)
+
+    ships = []
+    mmsis = set()
+    for i in range(max_ships):
+        route = list(CHINA_ROUTES[i % len(CHINA_ROUTES)])
+        if rng.random() < 0.5:
+            route.reverse()
+        segs, total = _build_route_m(route)
+
+        speed_kn = rng.uniform(8.0, 17.0)
+        travel = speed_kn * _M_PER_NM / 3600.0 * duration_s
+        if travel > 0.9 * total:      # 不超出航线端点
+            speed_kn *= 0.9 * total / travel
+            travel = 0.9 * total
+        s0 = rng.uniform(0.0, total - travel)
+        lat_off = rng.uniform(-0.12, 0.12)   # 平行航道横向偏移
+        lon_off = rng.uniform(-0.12, 0.12)
+
+        name, ship_type = pool[i % len(pool)]
+        mmsi = 0
+        while mmsi in mmsis or mmsi == 0:
+            mid = rng.choice((412, 413, 414, 477))  # 中国/香港 MID
+            mmsi = mid * 1000000 + rng.randint(0, 999999)
+        mmsis.add(mmsi)
+
+        t, lats, lons, sogs, cogs = [], [], [], [], []
+        n = int(duration_s // dt_s)
+        for k in range(n + 1):
+            (lat, lon), cog = _point_at(segs, total, s0 + travel * k / n)
+            t.append(round(k * dt_s, 1))
+            lats.append(round(lat + lat_off, 4))
+            lons.append(round(lon + lon_off, 4))
+            sogs.append(round(speed_kn + rng.uniform(-0.3, 0.3), 1))
+            cogs.append(round(cog, 1))
+        ships.append({
+            "id": f"RShip-{len(ships) + 1:02d}",
+            "mmsi": mmsi, "name": name, "ship_type": ship_type,
+            "t": t, "lat": lats, "lon": lons, "sog": sogs, "cog": cogs,
+        })
+
+    out = {
+        "source": "china_near_seas_synthetic",
+        "date": "",
+        "bbox": list(bbox),
+        "max_gap_s": DEFAULT_MAX_GAP_S,
+        "ships": ships,
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"合成 {len(ships)} 艘中国近海演示轨迹 -> {out_path}"
+          f"（{os.path.getsize(out_path) / 1e6:.2f} MB）")
+    return len(ships)
+
+
+def cmd_generate(args):
+    bbox = DEFAULT_BBOX
+    if args.bbox:
+        try:
+            bbox = tuple(float(x) for x in args.bbox.split(","))
+            assert len(bbox) == 4
+        except (ValueError, AssertionError):
+            sys.exit("错误：--bbox 应为 lon_min,lat_min,lon_max,lat_max")
+    out_path = args.output or os.path.join(
+        AIS_DIR, "ships_marine_cadastre.json")
+    generate_tracks(out_path, bbox, args.max_ships, seed=args.seed)
+
+
+# ---------------------------------------------------------------------------
 # selftest：内置最小样例验证转换管线（不依赖网络）
 # ---------------------------------------------------------------------------
 
@@ -373,6 +551,17 @@ def main():
     p_conv.add_argument("--max-gap-s", type=float, default=DEFAULT_MAX_GAP_S,
                         help="轨迹时间空洞上限（秒）")
     p_conv.set_defaults(func=cmd_convert)
+
+    p_gen = sub.add_parser("generate",
+                           help="合成中国近海演示轨迹（NOAA 不覆盖中国海域）")
+    p_gen.add_argument("--output", default=None, help="输出 JSON 路径")
+    p_gen.add_argument("--bbox", default=None,
+                       help="筛选框 lon_min,lat_min,lon_max,lat_max "
+                            f"（默认 {DEFAULT_BBOX}）")
+    p_gen.add_argument("--max-ships", type=int, default=DEFAULT_MAX_SHIPS)
+    p_gen.add_argument("--seed", type=int, default=20260827,
+                       help="随机种子（默认定值，保证可复现）")
+    p_gen.set_defaults(func=cmd_generate)
 
     p_self = sub.add_parser("selftest", help="内置样例离线自检")
     p_self.set_defaults(func=cmd_selftest)

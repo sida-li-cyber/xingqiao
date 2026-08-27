@@ -41,6 +41,22 @@
         /* Cesium 自带工具条（home/全屏）紧邻右上“已连接”徽章左侧，避免重叠 */
         .cesium-viewer-toolbar { top: 14px; right: 110px; }
 
+        /* Cesium SceneModePicker 下拉菜单：抬升至所有自定义玻璃态面板之上。
+           玻璃面板动态推叠 TOP_Z 自 100 递增、断线遮罩最高 60，9999 远高于其常规上限。
+           CesiumJS 1.141 中下拉菜单被 .cesium-sceneModePicker-wrapper 包裹，
+           该 wrapper 自带 z-index:0 形成堆叠上下文，必须连同 wrapper 一起抬升，
+           否则内部下拉的 z-index 会被困住；显式 position 保证 z-index 生效，
+           pointer-events 保证菜单项可点击 */
+        .cesium-sceneModePicker-wrapper {
+            position: relative;
+            z-index: 9999;
+        }
+        .cesium-sceneModePicker-dropDown {
+            position: absolute;
+            z-index: 9999;
+            pointer-events: auto;
+        }
+
         /* ---------- Glass panel base ---------- */
         .glass {
             position: absolute;
@@ -227,8 +243,37 @@
         .mode-select option { background: #161b27; }
 
         /* ---------- Time-series chart panel ---------- */
-        #chartPanel { left: 14px; bottom: 22px; width: 250px; }
-        #chartReopen { left: 14px; bottom: 22px; top: auto; }
+        /* 拖动上边缘（面板头部）即可移动面板；双击头部恢复联动定位；最近操作的面板置顶 */
+        #layersPanel .panel-header, #statsPanel .panel-header,
+        #chartPanel .panel-header, #filePanel .panel-header,
+        #detailPanel .panel-header { cursor: grab; touch-action: none; user-select: none; }
+        /* 自定义星座面板无 .panel-header，以标题行作拖动手柄 */
+        #constellationPanel .cp-title { cursor: grab; touch-action: none; user-select: none; }
+        .glass.dragging { transition: none; }
+        .glass.dragging .panel-header, .glass.dragging .cp-title { cursor: grabbing; }
+        /* 面板缩放手柄：悬停左/右边缘显示 ew-resize，下边缘显示 ns-resize（手柄由脚本动态注入） */
+        .resize-handle { position: absolute; z-index: 5; touch-action: none; user-select: none; }
+        .resize-handle.rh-left   { top: 0; left: 0;  width: 6px;  height: 100%; cursor: ew-resize; }
+        .resize-handle.rh-right  { top: 0; right: 0; width: 6px;  height: 100%; cursor: ew-resize; }
+        .resize-handle.rh-bottom { left: 0; bottom: 0; width: 100%; height: 6px; cursor: ns-resize; }
+        .glass.resizing { transition: none; }
+        /* 几何约束：时序指标上边缘位于「图层」(#layersPanel) 下边缘下方 14px（--panel-gap），
+           且右边缘与图层面板右边缘完全对齐（右侧边界重合）。
+           layersPanel 实际高度随内容变化、收起时 display:none，故由页尾 syncPanelGeometry
+           脚本按实测矩形动态联动；隐藏/收起时回退为以下相对计算值（70px + 图层 max-height）。 */
+        #chartPanel {
+            top: calc(100vh - 310px + var(--panel-gap));
+            right: calc(100vw - var(--panel-side) - var(--panel-width));
+            left: auto;
+            bottom: auto;
+            width: var(--panel-width);
+        }
+        #chartReopen {
+            top: calc(100vh - 310px + var(--panel-gap));
+            right: calc(100vw - var(--panel-side) - var(--panel-width));
+            left: auto;
+            bottom: auto;
+        }
         .chart-block { margin-bottom: 7px; }
         .chart-block:last-child { margin-bottom: 0; }
         .chart-title {
@@ -394,9 +439,18 @@
         }
 
         /* ---------- File transfer panel (Milestone A, C期) ---------- */
-        #filePanel { right: 14px; top: calc(70px + 42vh + 12px); width: 300px; max-height: calc(58vh - 104px); display: flex; flex-direction: column; }
+        /* 几何约束：文件传输上边缘位于「统计」(#statsPanel) 下边缘下方 14px（--panel-gap）；
+           水平采用右锚定：与统计面板共用恒定的距右边缘距离（--panel-side），窗口缩放下不变，
+           两者同宽时左边缘亦自然重合。实际下边缘由页尾 syncPanelGeometry 脚本按实测矩形动态维持。 */
+        :root { --panel-gap: 14px; --panel-side: 14px; --panel-width: 230px; }
+        #filePanel {
+            right: var(--panel-side);
+            left: auto;
+            top: calc(70px + 42vh + var(--panel-gap));
+            width: var(--panel-width); max-height: calc(58vh - 104px); display: flex; flex-direction: column;
+        }
         #filePanel .panel-body { overflow-y: auto; min-height: 0; }
-        #fileReopen { right: 14px; top: calc(70px + 42vh + 12px); }
+        #fileReopen { right: 14px; top: calc(70px + 42vh + var(--panel-gap)); }
         .file-form { display: flex; flex-direction: column; gap: 7px; padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
         .file-form .f-row { display: flex; gap: 7px; }
         .file-form .f-field { flex: 1; display: flex; flex-direction: column; gap: 3px; }
@@ -558,7 +612,7 @@
             #brand .sub { display: none; }
             #chartPanel { display: none; }
             #chartReopen { display: none !important; }
-            #filePanel { top: auto; bottom: 92px; max-height: 40vh; width: 280px; }
+            #filePanel { top: auto; bottom: 92px; left: auto; right: 14px; max-height: 40vh; width: 280px; }
             #fileReopen { top: auto; bottom: 92px; }
             #detailPanel { width: min(280px, calc(100vw - 28px)); }
         }
@@ -765,6 +819,270 @@
     <!-- Toast 提示 (P1) -->
     <div id="appToast"></div>
 
+
+    <!-- 面板几何联动：维持「时序指标↔图层」「文件传输↔统计」的对齐/间距约束。
+         - #chartPanel.top = #layersPanel 下边缘 + 14px，且 #chartPanel 右边缘对齐 #layersPanel 右边缘；
+         - #filePanel.top  = #statsPanel 下边缘 + 14px， 且 #filePanel 左边缘对齐 #statsPanel 左边缘。
+         窗口尺寸变化（resize / 内容撑高）与折叠/展开（display 切换）时均动态重算。 -->
+    <script>
+    (function () {
+        // 垂直间距：与 CSS --panel-gap 保持一致
+        var GAP = 14;
+        var NARROW = '(max-width: 900px)'; // 与 CSS 小屏断点保持一致
+        // 全部参与拖动/缩放/边界管理的玻璃态面板（与 makeDraggable/makeResizable 注册范围一致）
+        var PANEL_IDS = ['layersPanel', 'statsPanel', 'chartPanel', 'filePanel', 'constellationPanel', 'detailPanel'];
+
+        // 视口边界保护：将面板钉制（clamp）回可视区域，避免窗口缩小后越界；
+        // 锚定感知：右锚定面板（统计/文件传输等，left:auto + right 有值）不钳制水平方向，
+        // 保持其与视口右边缘的距离恒定；仅在确实越界时写样式，避免布局抖动；
+        // 面板尺寸大于视口可用空间时贴边（0），保证始终可操作。
+        function clampPanelToViewport(panel) {
+            if (!panel || panel.offsetParent === null) return;
+            var rect = panel.getBoundingClientRect();
+            var cs = getComputedStyle(panel);
+            var rightAnchored = cs.right !== 'auto' && cs.left === 'auto';
+            if (!rightAnchored) {
+                var nx = clamp(rect.left, 0, Math.max(0, window.innerWidth - rect.width));
+                if (nx !== rect.left) {
+                    panel.style.left = nx + 'px';
+                    panel.style.right = 'auto';
+                }
+            }
+            var ny = clamp(rect.top, 0, Math.max(0, window.innerHeight - rect.height));
+            if (ny !== rect.top) {
+                panel.style.top = ny + 'px';
+                panel.style.bottom = 'auto';
+            }
+        }
+
+        // 窗口缩放总入口：先重算联动对齐（--panel-gap 与边缘重合关系），再逐一钉制越界面板。
+        // CSS 锚定面板（图层 left:14px、统计 right:14px、chart/file 的 calc 回退）由浏览器自动保持边距，
+        // 钉制函数仅在越界时介入，不产生多余写入，避免布局抖动。
+        function onViewportResize() {
+            apply();
+            PANEL_IDS.forEach(function (id) {
+                clampPanelToViewport(document.getElementById(id));
+            });
+        }
+
+        function apply() {
+            var chart = document.getElementById('chartPanel');
+            var layers = document.getElementById('layersPanel');
+            var file = document.getElementById('filePanel');
+            var stats = document.getElementById('statsPanel');
+            if (!chart || !layers || !file || !stats) return;
+            var narrow = window.matchMedia && window.matchMedia(NARROW).matches;
+
+            // 时序指标 ← 图层：top 位于图层下边缘下方 14px，右边缘对齐；图层隐藏时回退 CSS 相对计算；
+            // 自身或参照面板（图层）被用户手动拖动 → 解除联动，保持原位不动；双击头部可恢复
+            if (chart.dataset.userPlaced || layers.dataset.userPlaced) {
+                // 保持当前位置不变（折叠按钮等操作不应重置已冻结的面板）
+            } else if (!narrow && layers.offsetParent !== null) {
+                var lr = layers.getBoundingClientRect();
+                chart.style.top = (lr.bottom + GAP) + 'px';
+                chart.style.right = (window.innerWidth - lr.right) + 'px';
+                chart.style.left = 'auto';
+                chart.style.bottom = 'auto';
+            } else {
+                chart.style.top = '';
+                chart.style.right = '';
+                chart.style.left = '';
+                chart.style.bottom = '';
+            }
+
+            // 文件传输 ← 统计：top 位于统计下边缘下方 14px；水平为右锚定，与统计共用恒定的
+            // 距右边缘距离（窗口缩放下不变，同宽时左边缘亦重合）；统计收起时回退 CSS 相对计算；
+            // 自身或参照面板（统计）被用户手动拖动 → 解除联动，保持原位不动；双击头部可恢复
+            if (file.dataset.userPlaced || stats.dataset.userPlaced) {
+                // 保持当前位置不变（折叠按钮等操作不应重置已冻结的面板）
+            } else if (!narrow && stats.offsetParent !== null) {
+                var sr = stats.getBoundingClientRect();
+                file.style.top = (sr.bottom + GAP) + 'px';
+                file.style.right = (window.innerWidth - sr.right) + 'px'; // = 统计距右边缘距离，恒定 14px
+                file.style.left = 'auto';
+            } else {
+                file.style.top = '';
+                file.style.left = '';
+                file.style.right = '';
+            }
+        }
+
+        window.addEventListener('resize', onViewportResize);
+        // 图层/统计面板折叠展开、内容高度变化时重新联动
+        var mo = new MutationObserver(apply);
+        ['layersPanel', 'statsPanel'].forEach(function (id) {
+            var el = document.getElementById(id);
+            if (el) mo.observe(el, { attributes: true, attributeFilter: ['style', 'class'] });
+        });
+        if (window.ResizeObserver) {
+            var ro = new ResizeObserver(apply);
+            ['layersPanel', 'statsPanel'].forEach(function (id) {
+                var el = document.getElementById(id);
+                if (el) ro.observe(el);
+            });
+        }
+        // ---------- 拖动上边缘移动面板 + 最近使用窗口置顶 ----------
+        function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+        // z-index 推叠机制：任意面板被按下/拖动/双击时提升为当前最高层级，
+        // 保证最近操作的窗口始终浮于其他面板之上，避免被遮挡
+        var TOP_Z = 100;
+        function bringToFront(panel) { panel.style.zIndex = String(++TOP_Z); }
+
+        // 将面板归一化为 left/top 锚定：去除 translateX 居中（如星座面板）、
+        // 将 right/bottom 锚定固化为等效 left/top，避免后续拖动/缩放坐标偏移；返回归一后的矩形
+        function normalizeAnchor(panel) {
+            var rect = panel.getBoundingClientRect();
+            if (getComputedStyle(panel).transform !== 'none') panel.style.transform = 'none';
+            panel.style.left = rect.left + 'px';
+            panel.style.top = rect.top + 'px';
+            panel.style.right = 'auto';
+            panel.style.bottom = 'auto';
+            return panel.getBoundingClientRect();
+        }
+
+        // 右缘面板：拖动/缩放释放后转为右锚定（right = 当前距视口右边缘距离，left: auto），
+        // 此后窗口缩放由浏览器原生维持右偏移，与右边缘的距离恒定不变（钉制函数亦不触碰其水平方向）
+        var RIGHT_EDGE_IDS = ['statsPanel', 'filePanel'];
+        function anchorToRightEdge(panel) {
+            if (!panel || panel.offsetParent === null) return;
+            var r = panel.getBoundingClientRect();
+            panel.style.right = Math.max(0, window.innerWidth - r.right) + 'px';
+            panel.style.left = 'auto';
+        }
+        function isRightEdgePanel(panelId) { return RIGHT_EDGE_IDS.indexOf(panelId) !== -1; }
+
+        function makeDraggable(panelId, handleSelector) {
+            var panel = document.getElementById(panelId);
+            if (!panel) return;
+            var handle = panel.querySelector(handleSelector || '.panel-header');
+            if (!handle) return;
+
+            handle.addEventListener('pointerdown', function (e) {
+                if (e.pointerType === 'mouse' && e.button !== 0) return;
+                if (e.target.closest('button')) return; // 折叠按钮不触发拖动；click 事件不受影响
+                var rect = normalizeAnchor(panel);
+                var dx = e.clientX - rect.left, dy = e.clientY - rect.top;
+                panel.classList.add('dragging');
+                try { handle.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器降级 */ }
+                e.preventDefault();
+
+                function onMove(ev) {
+                    var left = clamp(ev.clientX - dx, 0, Math.max(0, window.innerWidth - rect.width));
+                    var top = clamp(ev.clientY - dy, 0, Math.max(0, window.innerHeight - rect.height));
+                    panel.style.left = left + 'px';
+                    panel.style.top = top + 'px';
+                    panel.style.right = 'auto';
+                    panel.style.bottom = 'auto';
+                    panel.dataset.userPlaced = '1'; // 标记用户定位，几何联动跳过覆写（见 apply）
+                    bringToFront(panel); // 拖动过程中同步提升层级（pointermove）
+                }
+                function onUp(ev) {
+                    panel.classList.remove('dragging');
+                    handle.removeEventListener('pointermove', onMove);
+                    handle.removeEventListener('pointerup', onUp);
+                    handle.removeEventListener('pointercancel', onUp);
+                    try { handle.releasePointerCapture(ev.pointerId); } catch (err) { /* 忽略 */ }
+                    // 统计/文件传输：拖动后转右锚定，窗口缩放时与右边缘距离保持不变
+                    if (isRightEdgePanel(panelId)) anchorToRightEdge(panel);
+                }
+                handle.addEventListener('pointermove', onMove);
+                handle.addEventListener('pointerup', onUp);
+                handle.addEventListener('pointercancel', onUp);
+            });
+
+            // 面板内任意按下 / 双击 → 置顶（最近使用的窗口推叠在其他窗口之上）
+            panel.addEventListener('pointerdown', function () { bringToFront(panel); });
+            panel.addEventListener('dblclick', function () { bringToFront(panel); });
+
+            // 双击头部：清除用户定位，恢复对齐/间距联动（重新执行 apply）
+            handle.addEventListener('dblclick', function () {
+                delete panel.dataset.userPlaced;
+                panel.style.top = '';
+                panel.style.left = '';
+                panel.style.right = '';
+                panel.style.bottom = '';
+                apply();
+            });
+        }
+        // 所有玻璃态面板均可拖动；星座面板以 .cp-title 为手柄（内含表单输入，避免整面板拦截）
+        makeDraggable('layersPanel');
+        makeDraggable('statsPanel');
+        makeDraggable('chartPanel');
+        makeDraggable('filePanel');
+        makeDraggable('constellationPanel', '.cp-title');
+        makeDraggable('detailPanel');
+
+        // ---------- 边缘拖动调整窗口尺寸：左/右边缘改宽度，下边缘改高度 ----------
+        var MIN_W = 180, MIN_H = 100; // 最小宽高下限，防止缩到无法操作或内容溢出
+
+        function makeResizable(panelId) {
+            var panel = document.getElementById(panelId);
+            if (!panel) return;
+
+            [{ name: 'left', cls: 'rh-left' }, { name: 'right', cls: 'rh-right' }, { name: 'bottom', cls: 'rh-bottom' }]
+            .forEach(function (spec) {
+                var h = document.createElement('div');
+                h.className = 'resize-handle ' + spec.cls;
+                h.title = '拖动调整大小';
+                panel.appendChild(h);
+
+                h.addEventListener('pointerdown', function (e) {
+                    if (e.pointerType === 'mouse' && e.button !== 0) return;
+                    e.preventDefault();
+                    var rect = normalizeAnchor(panel);
+                    panel.style.maxWidth = 'none';
+                    panel.style.maxHeight = 'none'; // 解除 CSS 限高/宽，允许按需增大（视口仍作上限）
+                    panel.classList.add('resizing');
+                    try { h.setPointerCapture(e.pointerId); } catch (err) { /* 老浏览器降级 */ }
+                    var startX = e.clientX, startY = e.clientY;
+                    var w0 = rect.width, h0 = rect.height, l0 = rect.left, t0 = rect.top, r0 = rect.right;
+                    var pending = null, rafId = 0;
+
+                    function update() {
+                        rafId = 0;
+                        var dx = pending.clientX - startX, dy = pending.clientY - startY;
+                        if (spec.name === 'right') {
+                            // 视口边界保护：右边缘不超出视口右侧；最小宽度限制
+                            panel.style.width = clamp(w0 + dx, MIN_W, window.innerWidth - l0) + 'px';
+                        } else if (spec.name === 'left') {
+                            // 左边缘不超出视口左侧（最大宽度 = 当前右边缘坐标）
+                            var w = clamp(w0 - dx, MIN_W, r0);
+                            panel.style.left = (r0 - w) + 'px';
+                            panel.style.width = w + 'px';
+                        } else {
+                            // 下边缘不超出视口底部；最小高度限制
+                            panel.style.height = clamp(h0 + dy, MIN_H, window.innerHeight - t0) + 'px';
+                        }
+                    }
+                    function onMove(ev) {
+                        pending = ev; // rAF 合帧：每帧最多写一次样式，实时平滑缩放且避免布局抖动
+                        if (!rafId) rafId = requestAnimationFrame(update);
+                    }
+                    function onUp(ev) {
+                        if (rafId) cancelAnimationFrame(rafId);
+                        panel.classList.remove('resizing');
+                        h.removeEventListener('pointermove', onMove);
+                        h.removeEventListener('pointerup', onUp);
+                        h.removeEventListener('pointercancel', onUp);
+                        try { h.releasePointerCapture(ev.pointerId); } catch (err) { /* 忽略 */ }
+                        // 联动兼容：缩放只改尺寸不破边缘约束，释放后重新应用对齐逻辑；
+                        // 被 userPlaced 冻结的面板（自身或参照面板已手动拖动）仍保持原位，尺寸保留；
+                        // 统计/文件传输随后转右锚定，窗口缩放时与右边缘距离保持不变
+                        apply();
+                        if (isRightEdgePanel(panelId)) anchorToRightEdge(panel);
+                    }
+                    h.addEventListener('pointermove', onMove);
+                    h.addEventListener('pointerup', onUp);
+                    h.addEventListener('pointercancel', onUp);
+                });
+            });
+        }
+        PANEL_IDS.forEach(makeResizable);
+
+        apply();
+    })();
+    </script>
 
     <!-- JavaScript Modules -->
     <script src="../js/config.js?v=3kd"></script>

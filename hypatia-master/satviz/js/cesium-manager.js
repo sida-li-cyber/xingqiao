@@ -64,6 +64,21 @@ czm_material czm_getMaterial(czm_materialInput materialInput)
 // Flip to +1 if the flow ever renders backwards.
 const FLOW_SIGN = -1;
 
+// ============================================================================
+// Depth-occlusion dimming (nodes behind the globe turn semi-transparent)
+// ============================================================================
+// PointGraphics has no depthFailMaterial (that property belongs to
+// PolylineGraphics), and the node points keep
+// disableDepthTestDistance = POSITIVE_INFINITY so occluded nodes stay drawn
+// instead of vanishing. The "occluded => semi-transparent" effect is therefore
+// computed on the CPU: a camera -> node ray is tested against the globe
+// ellipsoid every preRender, and the node's color/label alpha is lowered while
+// the ray hits the ellipsoid before reaching the node.
+const OCCLUDED_ALPHA = 0.35;
+// Metres of slop so surface-sitting nodes (ships, ground stations) whose ray
+// hit point numerically coincides with their own position never self-occlude.
+const OCCLUSION_EPSILON = 10.0;
+
 let _movingDashRegistered = false;
 function ensureMovingDashMaterial() {
     if (_movingDashRegistered) return;
@@ -269,6 +284,17 @@ class CesiumManager {
         // {prev, target, t0, dur, lastArrival, result}.
         this.nodeInterp = new Map();
         this.interpInterval = 200;   // expected backend push period (ms, 5Hz)
+
+        // Depth-occlusion dimming state: nodeId -> {occluded}. Written by
+        // _updateNodeOcclusion every preRender; entity colors are only
+        // touched when a node's occlusion state flips.
+        this._nodeOcclusion = new Map();
+        // Scratch objects for the per-frame occlusion test (zero allocation).
+        this._occlScratch = {
+            dir: new Cesium.Cartesian3(),
+            ray: new Cesium.Ray(
+                new Cesium.Cartesian3(), new Cesium.Cartesian3(1, 0, 0)),
+        };
     }
 
     // ======================================================================
@@ -342,6 +368,11 @@ class CesiumManager {
             ensureMovingDashMaterial();
             this.scene.preRender.addEventListener(
                 () => this._animateMovingDashes());
+
+            // Depth-occlusion effect: dim nodes whose sight line from the
+            // camera crosses the globe (see _updateNodeOcclusion).
+            this.scene.preRender.addEventListener(
+                () => this._updateNodeOcclusion());
 
             this.setupEventHandlers();
             this.startFpsCounter();
@@ -561,10 +592,20 @@ class CesiumManager {
             );
         } else if (type && this.nodeTypes[type]) {
             const style = this.nodeTypes[type];
-            entity.point.color = new Cesium.ConstantProperty(style.color);
+            // Respect the current depth-occlusion state: a node sitting behind
+            // the globe keeps its semi-transparent look after deselection.
+            const nodeId = entity.properties.nodeId
+                ? entity.properties.nodeId.getValue() : null;
+            const occ = nodeId !== null
+                ? this._nodeOcclusion.get(nodeId) : null;
+            const alpha = (occ && occ.occluded) ? OCCLUDED_ALPHA : 1.0;
+            entity.point.color = new Cesium.ConstantProperty(
+                style.color.withAlpha(alpha));
             entity.point.pixelSize = new Cesium.ConstantProperty(style.pixelSize);
             if (entity.label) {
                 entity.label.show = new Cesium.ConstantProperty(style.labelShow);
+                entity.label.fillColor = new Cesium.ConstantProperty(
+                    Cesium.Color.WHITE.withAlpha(alpha));
             }
         }
     }
@@ -727,6 +768,80 @@ class CesiumManager {
 
     addOrUpdateShip(shipId, position, properties = {}) {
         return this.addOrUpdateNode(shipId, 'ship', position, properties);
+    }
+
+    // ======================================================================
+    // Depth-occlusion dimming
+    // ======================================================================
+
+    /**
+     * Per-frame occlusion test for every node entity (satellite / uav / ship /
+     * real_ship / ground_station). Fires a camera -> node ray at the globe
+     * ellipsoid; the node is "occluded" when the ellipsoid hit lies strictly
+     * between the camera and the node, and its color/label alpha is lowered
+     * to OCCLUDED_ALPHA until the sight line clears again.
+     *
+     * Performance notes: the test is a closed-form ray/ellipsoid intersection
+     * run against shared scratch objects (no per-frame allocation), and entity
+     * properties are only rewritten when a node's occlusion state FLIPS, so
+     * steady camera/node motion causes no property churn even at
+     * thousand-satellite scale. The currently selected node keeps its
+     * highlight color at full strength (its state is still tracked, so
+     * _restoreEntityStyle applies the right alpha on deselection).
+     */
+    _updateNodeOcclusion() {
+        const scene = this.scene;
+        const camPos = scene.camera.positionWC;
+        const ellipsoid = scene.globe
+            ? scene.globe.ellipsoid : Cesium.Ellipsoid.WGS84;
+        const time = this.viewer.clock.currentTime;
+        const dir = this._occlScratch.dir;
+        const ray = this._occlScratch.ray;
+
+        for (const [nodeId, entity] of this.entities.nodes) {
+            if (!entity.show) continue;
+            const pos = entity.position
+                ? entity.position.getValue(time) : null;
+            if (!pos) continue;
+
+            Cesium.Cartesian3.subtract(pos, camPos, dir);
+            const dist = Cesium.Cartesian3.magnitude(dir);
+            let occluded = false;
+            if (dist > 1.0) {
+                Cesium.Cartesian3.clone(camPos, ray.origin);
+                Cesium.Cartesian3.normalize(dir, ray.direction);
+                const hit = Cesium.IntersectionTests.rayEllipsoid(
+                    ray, ellipsoid);
+                occluded = !!hit && hit.start > 1.0
+                    && hit.start < dist - OCCLUSION_EPSILON;
+            }
+
+            let st = this._nodeOcclusion.get(nodeId);
+            if (!st) {
+                st = { occluded: false };
+                this._nodeOcclusion.set(nodeId, st);
+            }
+            if (st.occluded === occluded) continue;
+            st.occluded = occluded;
+
+            if (entity === this.selectedEntity) continue;
+            this._applyNodeOcclusionStyle(entity, occluded);
+        }
+    }
+
+    /** Write the dimmed/restored color + label style after an occlusion flip. */
+    _applyNodeOcclusionStyle(entity, occluded) {
+        const type = entity.properties && entity.properties.type
+            ? entity.properties.type.getValue() : null;
+        const style = this.nodeTypes[type];
+        if (!style || !entity.point) return;
+        const alpha = occluded ? OCCLUDED_ALPHA : 1.0;
+        entity.point.color = new Cesium.ConstantProperty(
+            style.color.withAlpha(alpha));
+        if (entity.label) {
+            entity.label.fillColor = new Cesium.ConstantProperty(
+                Cesium.Color.WHITE.withAlpha(alpha));
+        }
     }
 
     /**
@@ -1098,6 +1213,7 @@ class CesiumManager {
             this.viewer.entities.remove(this.entities.nodes.get(id));
             this.entities.nodes.delete(id);
             this.nodeInterp.delete(id);
+            this._nodeOcclusion.delete(id);
             if (this.stats[statKey] !== undefined) {
                 this.stats[statKey] = Math.max(0, this.stats[statKey] - 1);
             }
@@ -1391,6 +1507,7 @@ class CesiumManager {
         this.entities.links.clear();
         this.entities.islMesh = [];
         this.nodeInterp.clear();
+        this._nodeOcclusion.clear();
         this._highlightedLinks.clear();
         this._linkColorCache.clear();
         if (this.packetFlow) {
@@ -1401,6 +1518,9 @@ class CesiumManager {
             satellites: 0,
             uavs: 0,
             ships: 0,
+            // 真实船舶（AIS）计数键必须保留：addOrUpdateNode 仅在键存在时
+            // 累加，缺失会导致统计面板 realShipCount 恒为 0
+            real_ships: 0,
             ground_stations: 0,
             links: 0,
             fps: this.stats.fps,
