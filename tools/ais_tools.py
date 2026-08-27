@@ -49,6 +49,15 @@ import urllib.request
 import zipfile
 from datetime import datetime, timezone
 
+# 海陆掩码（可选依赖，推荐安装）：generate 合成轨迹时用于把落在
+# 陆地上的航点/轨迹点自动推离到最近水域（pip install global-land-mask，
+# 1km 分辨率栅格海陆数据，纯 numpy 查表，无网络请求）。
+try:
+    from global_land_mask import globe
+    _HAS_LANDMASK = True
+except ImportError:
+    _HAS_LANDMASK = False
+
 # 项目根目录 = tools/ 的上一级
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 AIS_DIR = os.path.join(ROOT_DIR, "realtime_backend", "data", "ais")
@@ -322,30 +331,33 @@ def cmd_convert(args):
 # 数据仅供演示/教学，source 字段标注为 synthetic。
 
 # 中国近海主要航道（(lat, lon) 航点序列）
+# 注意：所有航点必须落在海上。航线走向参考真实海运干线（渤海海峡、
+# 台湾海峡、琼州海峡等），避免直线横穿半岛/内陆。
 CHINA_ROUTES = [
-    # 天津 - 青岛（渤海/黄海沿岸南下）
-    [(38.9, 118.0), (38.3, 118.7), (37.6, 119.4), (36.9, 120.0), (36.1, 120.4)],
+    # 天津 - 青岛（经渤海海峡绕山东半岛成山头，勿直穿半岛）
+    [(38.9, 118.2), (38.4, 119.5), (38.2, 120.6), (38.0, 121.5), (37.5, 122.4),
+     (36.9, 122.5), (36.1, 121.2), (35.9, 120.6)],
     # 大连 - 烟台（渤海海峡渡轮）
-    [(38.9, 121.6), (38.5, 121.2), (38.0, 120.9), (37.6, 121.4)],
+    [(38.9, 121.6), (38.5, 121.2), (38.0, 120.9), (37.6, 121.65)],
     # 黄海南部 - 长江口（沿岸航线）
     [(36.0, 120.6), (34.5, 120.1), (33.0, 120.6), (31.8, 121.6), (31.0, 122.0)],
     # 上海/宁波外海（东海沿岸航线）
     [(31.0, 122.2), (30.0, 122.4), (29.0, 122.2), (28.0, 121.8)],
     # 东海干线（经宫古海峡方向）
     [(28.5, 122.0), (27.5, 123.5), (26.8, 125.0), (26.2, 126.5)],
-    # 台湾海峡南北向干线（近岸侧）
-    [(24.0, 118.2), (25.0, 119.0), (26.0, 119.8), (27.0, 120.5), (28.0, 121.2)],
-    # 台湾海峡南北向干线（外侧）
-    [(23.2, 117.2), (24.4, 118.0), (25.6, 118.8), (26.8, 119.6), (27.8, 120.3)],
-    # 粤东 - 厦门 - 福州（沿岸航线）
-    [(22.3, 115.0), (23.0, 116.2), (23.8, 117.2), (24.4, 118.1), (25.4, 119.2)],
-    # 珠江口 - 香港/深圳
-    [(21.8, 113.4), (22.1, 113.8), (22.3, 114.1), (22.5, 114.4), (22.8, 114.8)],
-    # 香港 - 海南西部（南海北部干线）
-    [(22.0, 114.2), (21.5, 112.5), (21.0, 111.0), (20.3, 110.6), (19.8, 110.3),
-     (19.0, 109.8), (18.3, 109.5)],
-    # 北部湾（琼州海峡 - 钦州/防城港）
-    [(20.1, 110.4), (20.3, 109.6), (20.8, 109.0), (21.5, 108.5), (21.7, 108.3)],
+    # 台湾海峡南北向干线（近岸侧，西端避开乐清湾岸线）
+    [(24.0, 118.2), (25.0, 119.0), (26.0, 119.8), (27.0, 120.5), (28.0, 121.65)],
+    # 台湾海峡南北向干线（外侧，避开厦门岛/温州湾岸线）
+    [(23.2, 117.2), (24.4, 118.45), (25.6, 118.8), (26.8, 119.6), (27.8, 120.65)],
+    # 粤东 - 厦门 - 福州（沿岸航线，避开南澳岛/湄洲湾岸线）
+    [(22.3, 115.0), (23.0, 116.2), (23.8, 117.55), (24.4, 118.45), (25.4, 119.55)],
+    # 珠江口 - 香港/深圳（伶仃洋 - 大鹏湾 - 大亚湾，均在海上）
+    [(21.6, 113.9), (22.0, 113.9), (22.3, 114.2), (22.5, 114.5), (22.8, 114.8)],
+    # 香港 - 海南西部（南海北部干线，避开阳江内陆）
+    [(22.0, 114.3), (21.6, 113.5), (21.2, 112.3), (20.6, 111.3), (20.0, 110.5),
+     (19.2, 109.9), (18.5, 109.4)],
+    # 北部湾（琼州海峡 - 钦州/防城港外海）
+    [(20.1, 110.4), (20.3, 109.6), (20.8, 109.0), (21.5, 108.5), (21.9, 108.05)],
     # 南海南下干线（向马六甲海峡方向）
     [(21.0, 111.5), (19.0, 110.8), (17.0, 110.5), (15.0, 110.8), (13.0, 111.5),
      (11.0, 112.5), (9.0, 113.0)],
@@ -409,6 +421,77 @@ def _point_at(segs, total, s):
     return q, math.degrees(math.atan2(dx, dy)) % 360.0
 
 
+# ---------------------------------------------------------------------------
+# 海陆净化：依赖 global-land-mask（未安装时为空操作）
+# ---------------------------------------------------------------------------
+
+def _snap_to_sea(lat, lon, max_off_deg=0.6, step_deg=0.01):
+    """(lat, lon) 落在陆地时，环形搜索最近水域并返回净化后的坐标。
+
+    返回 (lat, lon, r)：r 为搜索命中半径（海上原点 r=0；未命中 r=-1）。
+    最大搜索半径 0.6°（约 66km），覆盖近岸航线穿越半岛/海湾的情形。
+    注意：候选点先 round 到写入精度(4位)再判定——掩码海岸边界是
+    矢量级精度，先判定后 round 会在边界处翻转结果（实测踩坑）。
+    """
+    if not _HAS_LANDMASK or not globe.is_land(lat, lon):
+        return lat, lon, 0.0
+    cos_lat = max(0.2, math.cos(math.radians(lat)))
+    r = step_deg
+    while r <= max_off_deg:
+        for i in range(16):
+            a = math.radians(i * 22.5)
+            la = round(lat + r * math.sin(a), 4)
+            lo = round(lon + r * math.cos(a) / cos_lat, 4)
+            if not globe.is_land(la, lo):
+                return la, lo, r
+        r += step_deg
+    return lat, lon, -1.0   # 未找到水域（极罕见）：保留原点
+
+
+def _purify_route(route):
+    """航线折线净化：~4km 密集采样后把陆地点推离海岸。
+
+    返回 (净化后折线, 未命中点列表)。密集采样保证原折线穿越半岛时
+    净化点沿两侧海岸分布，连线大体贴岸而不再穿陆。
+    """
+    if not _HAS_LANDMASK:
+        return [tuple(p) for p in route], []
+    dense = []
+    for p, q in zip(route, route[1:]):
+        d = math.hypot(q[0] - p[0],
+                       (q[1] - p[1]) * math.cos(math.radians(p[0])))
+        n = max(1, int(d / 0.04))
+        for k in range(n):
+            f = k / n
+            dense.append((p[0] + f * (q[0] - p[0]),
+                          p[1] + f * (q[1] - p[1])))
+    dense.append(tuple(route[-1]))
+    out, missed = [], []
+    for la, lo in dense:
+        # 先 round 再判定：与轨迹写入精度对齐，避免舍入翻转海陆判定
+        la, lo = round(la, 4), round(lo, 4)
+        la2, lo2, r = _snap_to_sea(la, lo)
+        if r < 0:
+            missed.append((la, lo))
+        if out and (abs(out[-1][0] - la2) < 1e-4
+                    and abs(out[-1][1] - lo2) < 1e-4):
+            continue
+        out.append((la2, lo2))
+    return out, missed
+
+
+def _verify_tracks_at_sea(ships):
+    """生成后全量校验：返回仍在陆地上的轨迹点数（0 = 全部在水域）。"""
+    if not _HAS_LANDMASK:
+        return -1   # 未安装掩码，无法校验
+    bad = 0
+    for s in ships:
+        for la, lo in zip(s["lat"], s["lon"]):
+            if globe.is_land(la, lo):
+                bad += 1
+    return bad
+
+
 def generate_tracks(out_path, bbox, max_ships, duration_s=7200.0,
                     dt_s=120.0, seed=20260827):
     """沿 CHINA_ROUTES 合成 max_ships 艘演示船轨迹，写出 convert 同构 JSON。"""
@@ -418,10 +501,14 @@ def generate_tracks(out_path, bbox, max_ships, duration_s=7200.0,
 
     ships = []
     mmsis = set()
+    snap_missed = 0
     for i in range(max_ships):
         route = list(CHINA_ROUTES[i % len(CHINA_ROUTES)])
         if rng.random() < 0.5:
             route.reverse()
+        # 海陆净化：航点/折线推离陆地（需安装 global-land-mask）
+        route, missed = _purify_route(route)
+        snap_missed += len(missed)
         segs, total = _build_route_m(route)
 
         speed_kn = rng.uniform(8.0, 17.0)
@@ -430,8 +517,8 @@ def generate_tracks(out_path, bbox, max_ships, duration_s=7200.0,
             speed_kn *= 0.9 * total / travel
             travel = 0.9 * total
         s0 = rng.uniform(0.0, total - travel)
-        lat_off = rng.uniform(-0.12, 0.12)   # 平行航道横向偏移
-        lon_off = rng.uniform(-0.12, 0.12)
+        lat_off = rng.uniform(-0.03, 0.03)   # 平行航道横向偏移（~3km，航道宽度量级）
+        lon_off = rng.uniform(-0.03, 0.03)
 
         name, ship_type = pool[i % len(pool)]
         mmsi = 0
@@ -445,8 +532,17 @@ def generate_tracks(out_path, bbox, max_ships, duration_s=7200.0,
         for k in range(n + 1):
             (lat, lon), cog = _point_at(segs, total, s0 + travel * k / n)
             t.append(round(k * dt_s, 1))
-            lats.append(round(lat + lat_off, 4))
-            lons.append(round(lon + lon_off, 4))
+            # 先 round 再净化：掩码海岸边界是矢量级精度，若用未舍入
+            # 坐标判定、写入时再 round，可能在边界处翻转判定（已实测）。
+            la = round(lat + lat_off, 4)
+            lo = round(lon + lon_off, 4)
+            # 轨迹点级净化：横向偏移被推上岸时吸附回最近水域
+            if _HAS_LANDMASK:
+                la, lo, r = _snap_to_sea(la, lo)
+                if r < 0:
+                    snap_missed += 1
+            lats.append(la)
+            lons.append(lo)
             sogs.append(round(speed_kn + rng.uniform(-0.3, 0.3), 1))
             cogs.append(round(cog, 1))
         ships.append({
@@ -467,6 +563,15 @@ def generate_tracks(out_path, bbox, max_ships, duration_s=7200.0,
         json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
     print(f"合成 {len(ships)} 艘中国近海演示轨迹 -> {out_path}"
           f"（{os.path.getsize(out_path) / 1e6:.2f} MB）")
+    if not _HAS_LANDMASK:
+        print("[WARN] 未安装 global-land-mask，跳过海陆净化与校验"
+              "（pip install global-land-mask）")
+    else:
+        bad = _verify_tracks_at_sea(ships)
+        if bad == 0:
+            print("海陆校验: 全部轨迹点均在水域 ✓")
+        else:
+            print(f"[WARN] {bad} 个轨迹点仍在陆地上（净化未命中 {snap_missed} 处）")
     return len(ships)
 
 
