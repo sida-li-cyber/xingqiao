@@ -368,17 +368,17 @@ python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 50
 
 > 提示：若仿真已跑到 `duration` 上限自动暂停，`file_send` 会自动延长仿真时长并恢复播放，传输不会卡死；seek / stop / reset 等时间跳变会中断在途传输（后端标记为 `CANCELLED`）。详见 [docs/protocol-v3.2-file-transfer.md](docs/protocol-v3.2-file-transfer.md)。
 
-### 6.9 教学实验与教学平台（E1–E7）
+### 6.9 教学实验与教学平台（E1–E9）
 
 面向课堂的"预习 → 操作 → 存档 → 报告 → 考核"闭环教学平台，三个入口：
 
 | 入口 | URL | 用途 |
 |---|---|---|
-| 演示模式 | `static_html/index.html` | 答辩/展示；右上角「🧪 教学实验」面板可运行 E1–E7 |
+| 演示模式 | `static_html/index.html` | 答辩/展示；右上角「🧪 教学实验」面板可运行 E1–E9 |
 | 学生实验台 | `static_html/lab.html` | 教学工位：左实验列表 / 中输入表单 / 右输出区，参数可调 |
 | 教师端 | `static_html/teacher.html` | 口令登录（默认 `starbridge`）后：统计 / 成绩册 / 班级名单 / 批改 / 考核管理 |
 
-实验目录（E1–E7，核心判据）：
+实验目录（E1–E9，核心判据）：
 
 | 编号 | 实验 | 核心判据 |
 |---|---|---|
@@ -389,6 +389,8 @@ python tools/file_transfer_client.py <file> --src UAV-01 --dst Beijing --rate 50
 | E5 | 路由算法对比 | 拥塞：最短时延丢 (λ−C)/λ、负载感知绕行近零；畅通：两路由 e2e 相当（±5%） |
 | E6 | 星座规模探索 | 网格跳数 = (P−1) + ⌊M/2⌋，e2e = 接入 + 跳数×ISL + 下行 |
 | E7 | 链路预算雨衰 | Ka 雨衰 a dB → 容量 ×10^(−a/10)；拥塞丢包 = 1 − C_eff/λ |
+| E8 | 链路故障诊断 | 诊断型：根因链路定位（70%）+ 证据链完整性（30%），观测边界定位法 |
+| E9 | 星座设计（逆向） | 设计型：目标约束 e2e ≤ 40 ms / 丢包 ≤ 1% / 跳数 ≤ 4，判据权重 4/2/3/1 + 迭代 ≥3 组不同方案 |
 
 每个实验在**独立沙箱引擎**中运行，不干扰主星座仿真；参数由声明式
 inputs Schema 下发（范围/步进/默认/单位），`experiment_run` 可携带

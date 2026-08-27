@@ -1502,6 +1502,10 @@ class DemoSimCore:
             # 教学实验（改进 #2）：在独立沙箱引擎中运行，主仿真不受影响。
             exp_id = str(params.get("exp_id", ""))
             run_params = params.get("params") or {}
+            # P1 参数扫描：可选 "attempts"（该学生本实验的历史运行列表）
+            # 透传给 run_experiment(prior_attempts=...)，与结果帧的
+            # attempt 字段配合完成 attempts 存档闭环。
+            attempts = params.get("attempts")
             # 清理已结束的旧任务记录，再判并发上限。
             self._experiment_runs = {
                 rid: t for rid, t in self._experiment_runs.items()
@@ -1512,7 +1516,7 @@ class DemoSimCore:
                 # S5：并发满 → 排队而非拒绝；前面的任务结束后自动开跑。
                 self._experiment_queue.append(
                     {"run_id": run_id, "exp_id": exp_id,
-                     "params": run_params})
+                     "params": run_params, "attempts": attempts})
                 self._experiment_outbox.append({
                     "message_type": "experiment_update",
                     "payload": {"exp_id": exp_id, "run_id": run_id,
@@ -1522,7 +1526,7 @@ class DemoSimCore:
                 print(f"  [experiment] queued: {run_id} "
                       f"(pos {len(self._experiment_queue)})")
                 return
-            self._experiment_start(exp_id, run_params, run_id)
+            self._experiment_start(exp_id, run_params, run_id, attempts)
             print(f"  [experiment] run: {run_id} params={run_params}")
         elif action == "experiment_quiz":
             # 预习测验判分（改进计划 W2）：答案仅存核心侧，前端只传选项序号。
@@ -1606,12 +1610,14 @@ class DemoSimCore:
             if self.ws is not None:
                 await self.ws.send(json.dumps(self.get_init_message()))
 
-    def _experiment_start(self, exp_id, run_params, run_id):
+    def _experiment_start(self, exp_id, run_params, run_id,
+                          prior_attempts=None):
         """启动一个实验任务（并发上限内）。"""
         self._experiment_cancels[run_id] = False
         self._experiment_runs[run_id] = (
             asyncio.get_event_loop().create_task(
-                self._experiment_loop(exp_id, run_params, run_id)))
+                self._experiment_loop(exp_id, run_params, run_id,
+                                      prior_attempts)))
 
     def _pump_experiment_queue(self):
         """并发空位出现时按 FIFO 启动排队实验（S5）。"""
@@ -1622,7 +1628,8 @@ class DemoSimCore:
                and len(self._experiment_runs) < MAX_CONCURRENT_EXPERIMENTS):
             item = self._experiment_queue.pop(0)
             self._experiment_start(item["exp_id"], item["params"],
-                                   item["run_id"])
+                                   item["run_id"],
+                                   item.get("attempts"))
             print(f"  [experiment] run (dequeued): {item['run_id']}")
 
     def _apply_constellation(self, shells, name):
@@ -1670,7 +1677,8 @@ class DemoSimCore:
         self.engine = PacketEngine(
             seed=42, config={"packet_size_bytes": PACKET_SIZE_BYTES})
 
-    async def _experiment_loop(self, exp_id, run_params=None, run_id=""):
+    async def _experiment_loop(self, exp_id, run_params=None, run_id="",
+                               prior_attempts=None):
         """运行一个教学实验并把进度/结果推入 outbox（主循环转发）。"""
         def on_progress(update):
             self._experiment_outbox.append({
@@ -1683,7 +1691,7 @@ class DemoSimCore:
             result = await run_experiment(
                 exp_id, run_params=run_params, on_progress=on_progress,
                 cancel_check=lambda: self._experiment_cancels.get(
-                    run_id, False))
+                    run_id, False), prior_attempts=prior_attempts)
             self._experiment_outbox.append({
                 "message_type": "experiment_update",
                 "payload": {"exp_id": exp_id, "run_id": run_id,

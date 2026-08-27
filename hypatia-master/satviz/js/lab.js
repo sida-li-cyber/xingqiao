@@ -84,6 +84,20 @@ const THEORY = {
                 ? (1 - capKpps * 1000 / p.src_pps) * 100 : 0, digits: 1, unit: '%' },
         ] };
     },
+    /* E9 逆向设计：跳数-时延换算 + 目标约束达标预判（达标线对齐后端 E9_TARGETS） */
+    E9: (p) => {
+        const hops = (p.planes - 1) + Math.floor(p.sats_per_plane / 2);
+        const e2e = 11 + hops * 8;
+        return { cards: [
+            { label: '星座规模', val: p.planes * p.sats_per_plane, digits: 0, unit: '星' },
+            { label: '最短跳数（目标 ≤ 4）', val: hops, digits: 0, unit: '跳',
+              state: hops <= 4 ? 'free' : 'cong',
+              stateText: hops <= 4 ? '跳数达标' : '跳数超标' },
+            { label: '理论端到端时延（目标 ≤ 40）', val: e2e, digits: 0, unit: 'ms',
+              state: e2e <= 40 ? 'free' : 'cong',
+              stateText: e2e <= 40 ? 'e2e 达标' : 'e2e 超标' },
+        ] };
+    },
 };
 
 const STAGE_ZH = {
@@ -92,6 +106,15 @@ const STAGE_ZH = {
     run_delay: '最短时延路由', run_load_aware: '负载感知路由',
     queued: '排队等待',
 };
+
+/* 参数扫描键（与 experiments.py 各实验 sweep_key 对齐；E8 诊断型 /
+   E9 设计型无扫描键，历史表中回退展示其参数摘要） */
+const SWEEP_KEYS = {
+    E1: 'pps', E2: 'rho', E3: 'src_pps', E4: 'low_pps',
+    E5: 'src_pps', E6: 'sats_per_plane', E7: 'rain_db',
+};
+
+const ATTEMPTS_MAX = 20;    // attempts 历史上限（每实验）
 
 const NODE_STYLE = {
     uav: { color: '#34d399', icon: 'UAV' },
@@ -129,6 +152,8 @@ class LabApp {
         this.results = {};        // exp_id -> result（内存 + 存档）
         this.quizGrades = {};     // exp_id -> quiz grade（最近一次判分）
         this.qAnswers = {};       // exp_id -> {"0": text, ...} 思考题作答
+        this.attempts = {};       // exp_id -> [attempt]（参数-结果历史，上限 20）
+        this.analysis = {};       // exp_id -> 分析结论文本（报告必填）
         this.running = false;
         this.topoState = 'initial';   // E3: initial | switched
         this._pktAnims = [];
@@ -152,8 +177,13 @@ class LabApp {
             this.results = raw.results || {};
             this.qAnswers = raw.qAnswers || {};
             this.quizGrades = raw.quizGrades || {};
+            this.attempts = raw.attempts || {};
+            this.analysis = raw.analysis || {};
             this._lastCurrent = raw.current || null;
-        } catch (e) { this.results = {}; this.qAnswers = {}; this.quizGrades = {}; }
+        } catch (e) {
+            this.results = {}; this.qAnswers = {}; this.quizGrades = {};
+            this.attempts = {}; this.analysis = {};
+        }
     }
 
     _saveArchive() {
@@ -161,6 +191,7 @@ class LabApp {
             localStorage.setItem(LS_KEY, JSON.stringify({
                 results: this.results, qAnswers: this.qAnswers,
                 quizGrades: this.quizGrades,
+                attempts: this.attempts, analysis: this.analysis,
                 current: this.current && this.current.exp_id,
             }));
         } catch (e) { /* 存储满等场景忽略 */ }
@@ -704,10 +735,37 @@ class LabApp {
         box.innerHTML = '';
         /* 考核模式：参数被教师冻结（exam.params 或实验默认值），滑杆禁用 */
         const locked = !!this.exam;
+        /* E8 诊断型：两阶段流程说明（观测 → 提交） */
+        if (this.current.exp_id === 'E8') {
+            const guide = document.createElement('div');
+            guide.className = 'p-guide';
+            guide.innerHTML =
+                '两阶段流程：① <b>观测</b>——只填「探测节点」运行，' +
+                '从探测观测表找干净/劣化分界；② <b>提交</b>——填「根因链路」' +
+                '与「证据链」再次运行完成诊断。';
+            box.appendChild(guide);
+        }
         for (const f of this.current.inputs) {
             const div = document.createElement('div');
             div.className = 'param' + (locked ? ' locked' : '');
             const val = this.params[f.key];
+            if (f.type === 'str' || f.type === 'text') {
+                /* 文本型输入（E8）：str 单行 / text 多行 */
+                div.innerHTML =
+                    `<div class="p-head"><span class="p-label">${esc(f.label)}</span></div>` +
+                    (f.type === 'text'
+                        ? `<textarea class="p-area" rows="3" maxlength="500"${locked ? ' disabled' : ''}>${esc(val)}</textarea>`
+                        : `<input type="text" class="p-text" maxlength="64" value="${esc(val)}"${locked ? ' disabled' : ''}>`) +
+                    (locked
+                        ? '<div class="p-tip">🔒 考核模式：参数已锁定</div>'
+                        : (f.tip ? `<div class="p-tip">${esc(f.tip)}</div>` : ''));
+                const input = div.querySelector('input, textarea');
+                input.addEventListener('input', () => {
+                    this.params[f.key] = input.value;
+                });
+                box.appendChild(div);
+                continue;
+            }
             div.innerHTML =
                 `<div class="p-head"><span class="p-label">${esc(f.label)}</span>` +
                 `<span class="p-val">${val}</span>` +
@@ -767,15 +825,20 @@ class LabApp {
         btn.textContent = '✕ 取消实验';
         btn.classList.remove('btn-primary');
         btn.classList.add('btn-danger');
-        document.querySelectorAll('#paramList input').forEach((i) => i.disabled = true);
+        document.querySelectorAll('#paramList input, #paramList textarea')
+            .forEach((i) => i.disabled = true);
         document.getElementById('outActions').style.display = 'none';
         this._renderProgress({ stage: 'warmup', progress: 0, note: '命令已下发' });
         /* 考核模式：注入教师指定的种子（核心侧保留键 _seed），记录绑定考试 */
         const runParams = Object.assign({}, this.params);
         this._runExamId = this.exam ? this.exam.id : '';
         if (this.exam) runParams._seed = this.exam.seed;
+        /* P1 参数扫描：携带本实验 attempts 历史（发送副本，防核心侧变异） */
+        const attempts = (this.attempts[this.current.exp_id] || []).map(
+            (a) => Object.assign({}, a,
+                { params: Object.assign({}, a.params) }));
         this.ws.sendCommand('experiment_run',
-            { exp_id: this.current.exp_id, params: runParams });
+            { exp_id: this.current.exp_id, params: runParams, attempts });
     }
 
     cancel() {
@@ -790,7 +853,8 @@ class LabApp {
         btn.classList.add('btn-primary');
         btn.classList.remove('btn-danger');
         btn.disabled = !this.ws.isConnected;
-        document.querySelectorAll('#paramList input').forEach((i) => i.disabled = false);
+        document.querySelectorAll('#paramList input, #paramList textarea')
+            .forEach((i) => i.disabled = false);
     }
 
     /* ---------------- 实验更新帧 ---------------- */
@@ -827,6 +891,16 @@ class LabApp {
             const r = Object.assign({ _ts: Date.now(),
                 _examId: this._runExamId || '' }, p.result);
             this.results[p.exp_id] = r;
+            /* P1 attempts 存档：本次运行摘要追加本地历史（上限 20 条） */
+            if (r.attempt) {
+                const list = this.attempts[p.exp_id] =
+                    this.attempts[p.exp_id] || [];
+                list.push(Object.assign({}, r.attempt,
+                    { params: Object.assign({}, r.attempt.params) }));
+                if (list.length > ATTEMPTS_MAX) {
+                    this.attempts[p.exp_id] = list.slice(-ATTEMPTS_MAX);
+                }
+            }
             this._saveArchive();
             this._rescore();                     // 合成总分 + 步骤日志
             this._renderProgress(null);
@@ -873,6 +947,8 @@ class LabApp {
             concl.innerHTML = '';
             actions.style.display = 'none';
             document.getElementById('scoreCard').innerHTML = '';
+            document.getElementById('histWrap').innerHTML = '';
+            document.getElementById('analysisBox').style.display = 'none';
             return;
         }
         const rows = result.verdict.map((r) =>
@@ -882,15 +958,93 @@ class LabApp {
             `<td>${esc(r.measured)}${r.unit ? ' ' + esc(r.unit) : ''}</td>` +
             `<td class="${r.pass ? 'ok' : 'bad-t'}">${r.pass ? '✔ 通过' : '✘ 未通过'}</td></tr>`)
             .join('');
+        /* E9 设计型：目标约束徽标条（判据表上方，达标线 vs 本次实测，
+           达标绿 / 未达标红；targets/measured 由后端随结果下发） */
+        let tgtHtml = '';
+        if (result.targets) {
+            const t = result.targets;
+            const mv = result.measured || {};
+            const badges = [
+                { name: '端到端时延', limit: `≤ ${t.e2e_max_ms} ms`,
+                  val: mv.e2e_ms != null ? mv.e2e_ms.toFixed(1) + ' ms' : '—',
+                  ok: mv.e2e_ms != null && mv.e2e_ms <= t.e2e_max_ms },
+                { name: '丢包率', limit: `≤ ${(t.loss_max * 100).toFixed(0)}%`,
+                  val: mv.loss != null ? (mv.loss * 100).toFixed(2) + '%' : '—',
+                  ok: mv.loss != null && mv.loss <= t.loss_max },
+                { name: 'ISL 跳数', limit: `≤ ${t.hops_max}`,
+                  val: mv.hops != null ? String(mv.hops) : '—',
+                  ok: mv.hops != null && mv.hops <= t.hops_max },
+            ];
+            tgtHtml = '<div class="tgt-bar">' + badges.map((b) =>
+                `<div class="tgt-badge ${b.ok ? 'ok' : 'bad'}">` +
+                `<span class="tgt-name">${esc(b.name)}</span>` +
+                `<b class="tgt-val">${esc(b.val)}</b>` +
+                `<span class="tgt-limit">目标 ${esc(b.limit)}</span>` +
+                `<span class="tgt-mark">${b.ok ? '✔ 达标' : '✘ 未达标'}</span>` +
+                '</div>').join('') + '</div>';
+        }
+        /* E8 探测观测表：丢包率 ≥ 20% 判定劣化（红），否则正常（绿） */
+        let obsHtml = '';
+        if (Array.isArray(result.observations) && result.observations.length) {
+            const obsRows = result.observations.map((o) => {
+                const bad = o.loss_pct >= 20;
+                return `<tr class="${bad ? 'fail-row' : 'pass-row'}">` +
+                    `<td>${esc(o.node)}</td>` +
+                    `<td class="${bad ? 'bad-t' : 'ok'}">${o.loss_pct}%</td>` +
+                    `<td>${o.e2e_ms} ms</td>` +
+                    `<td>${o.pkts_sent}</td>` +
+                    `<td>${o.pkts_dropped}</td>` +
+                    `<td><span class="obs-tag ${bad ? 'bad' : 'ok'}">` +
+                    `${bad ? '劣化' : '正常'}</span></td></tr>`;
+            }).join('');
+            obsHtml =
+                '<div class="obs-title">探测观测表' +
+                '<small>（丢包率 ≥ 20% 判定劣化，分界即根因所在段）</small></div>' +
+                '<table class="vt"><thead><tr><th>探测节点</th><th>丢包率</th>' +
+                '<th>e2e 时延</th><th>发送</th><th>丢弃</th><th>状态</th>' +
+                `</thead><tbody>${obsRows}</tbody></table>`;
+        }
+        /* E9 设计型：方案对比表（history ≥2 条时显示；末行为本次方案，
+           本次行高亮，缺 e2e/跳数指标的历史行显示 —；本次得分取
+           result.score——runner 组装 history 时本次尚未判分） */
+        let cmpHtml = '';
+        if (Array.isArray(result.history) && result.history.length >= 2) {
+            const hist = result.history;
+            const cmpRows = hist.map((h, i) => {
+                const cur = i === hist.length - 1;
+                const score = h.score != null ? h.score
+                    : (cur ? result.score : null);
+                const cell = (v, digits) => v != null
+                    ? esc(String(digits != null
+                        ? Number(v).toFixed(digits) : v)) : '—';
+                return `<tr class="${cur ? 'cur-row' : ''}">` +
+                    `<td>${i + 1}${cur ? '<b class="cur-mark"> · 本次</b>' : ''}</td>` +
+                    `<td>${cell(h.planes)}×${cell(h.sats_per_plane)}</td>` +
+                    `<td>${cell(h.src_pps)}</td>` +
+                    `<td>${cell(h.e2e_ms, 1)}</td>` +
+                    `<td>${cell(h.hops)}</td>` +
+                    `<td>${score != null ? esc(String(score)) : '—'}</td></tr>`;
+            }).join('');
+            cmpHtml =
+                '<div class="obs-title">方案对比' +
+                '<small>（多组设计迭代对比，末行为本次方案）</small></div>' +
+                '<table class="vt"><thead><tr><th>#</th><th>P×M</th>' +
+                '<th>源速率 (pps)</th><th>e2e (ms)</th><th>跳数</th><th>得分</th>' +
+                `</tr></thead><tbody>${cmpRows}</tbody></table>`;
+        }
         wrap.innerHTML =
+            tgtHtml +
             `<table class="vt"><thead><tr><th>判据</th><th>理论值</th>` +
-            `<th>实测值</th><th>判定</th></tr></thead><tbody>${rows}</tbody></table>`;
+            `<th>实测值</th><th>判定</th></tr></thead><tbody>${rows}</tbody></table>` +
+            obsHtml + cmpHtml;
         concl.innerHTML =
             `<div class="concl ${result.all_pass ? '' : 'fail'}">` +
             `<b class="${result.all_pass ? 'ok' : 'bad-t'}" style="color:inherit">` +
             `${result.all_pass ? '✔ 对账通过' : '✘ 对账未通过'}</b>　` +
             `${esc(result.conclusion)}</div>`;
         this._renderScorecard(result);
+        this._renderHistory(result);             // 参数-结果历史（≥2 条显示）
+        this._renderAnalysis();                  // 分析结论（报告必填）
         actions.style.display = 'flex';
         this._refreshOutActions();
     }
@@ -910,6 +1064,79 @@ class LabApp {
         } else {
             sub.disabled = false; sub.textContent = '⇧ 提交报告';
         }
+    }
+
+    /* ---------------- 参数-结果历史 & 分析结论（P1/P3） ---------------- */
+    /* 合并本地 attempts 历史与当前 result.attempt（按 ts 去重），时间升序 */
+    _attemptList(result) {
+        const list = (this.attempts[this.current.exp_id] || []).slice();
+        const att = result && result.attempt;
+        if (att && !list.some((a) => a.ts === att.ts)) {
+            list.push(Object.assign({}, att));
+        }
+        list.sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+        return list;
+    }
+
+    /* 历史行「参数」格：优先 sweep_key 取值；无扫描键（E8）回退文本参数摘要 */
+    _attParamCell(att) {
+        const inputs = this.current.inputs || [];
+        const key = SWEEP_KEYS[this.current.exp_id];
+        if (key) {
+            const f = inputs.find((i) => i.key === key);
+            const v = (att.params || {})[key];
+            if (f && v != null) {
+                return `${esc(f.label)} = ${esc(String(v))}` +
+                    (f.unit ? ` ${esc(f.unit)}` : '');
+            }
+        }
+        const parts = [];
+        for (const [k, v] of Object.entries(att.params || {})) {
+            const s = String(v == null ? '' : v);
+            if (s.length > 40) continue;          // 证据链等长文本不入表
+            const f = inputs.find((i) => i.key === k);
+            parts.push(`${f ? esc(f.label) : esc(k)}=${esc(s || '（未填）')}`);
+        }
+        return parts.join('，') || '—';
+    }
+
+    /* 历史行「关键指标」格：attempt.metrics 前 3 个数值判据 */
+    _attMetricsCell(att) {
+        return Object.entries(att.metrics || {}).map(
+            ([k, v]) => `${esc(k)} ${esc(String(v))}`).join('；') || '—';
+    }
+
+    _renderHistory(result) {
+        const box = document.getElementById('histWrap');
+        if (!box) return;
+        const list = this._attemptList(result);
+        if (list.length < 2) { box.innerHTML = ''; return; }
+        const rows = list.map((a, i) =>
+            `<tr class="${a.all_pass ? 'pass-row' : 'fail-row'}">` +
+            `<td>${i + 1}</td>` +
+            `<td>${esc(String(a.ts || '').replace('T', ' ').slice(5, 19))}</td>` +
+            `<td>${this._attParamCell(a)}</td>` +
+            `<td>${this._attMetricsCell(a)}</td>` +
+            `<td>${a.score != null ? a.score : '—'}</td>` +
+            `<td class="${a.all_pass ? 'ok' : 'bad-t'}">` +
+            `${a.all_pass ? '✔ 通过' : '✘ 未通过'}</td></tr>`).join('');
+        box.innerHTML =
+            `<div class="hist-title">参数-结果历史` +
+            `<small>（共 ${list.length} 次尝试 · 参数扫描满分需 ≥4 组取值）` +
+            `</small></div>` +
+            '<table class="vt"><thead><tr><th>#</th><th>时间</th>' +
+            '<th>参数</th><th>关键指标</th><th>得分</th><th>判定</th></tr>' +
+            `</thead><tbody>${rows}</tbody></table>`;
+    }
+
+    _renderAnalysis() {
+        const box = document.getElementById('analysisBox');
+        const ta = document.getElementById('anaText');
+        if (!box || !ta) return;
+        const r = this.current && this.results[this.current.exp_id];
+        if (!r || !r.verdict) { box.style.display = 'none'; return; }
+        box.style.display = '';
+        ta.value = this.analysis[this.current.exp_id] || '';
     }
 
     /* ---------------- SVG 拓扑 ---------------- */
@@ -1015,6 +1242,12 @@ class LabApp {
     downloadReport() {
         const r = this.results[this.current.exp_id];
         if (!r) return;
+        /* P3 分析结论必填：空则阻止下载 */
+        const analysis = String(this.analysis[this.current.exp_id] || '').trim();
+        if (!analysis) {
+            this._toast('请先在「分析结论」中填写结论，再下载报告');
+            return;
+        }
         this._stepPause(4);
         const now = new Date();
         const pad = (n) => String(n).padStart(2, '0');
@@ -1031,6 +1264,18 @@ class LabApp {
             `<td>${esc(row.label)}</td><td>${esc(String(row.theory))}</td>` +
             `<td>${esc(String(row.measured))}${row.unit ? ' ' + esc(row.unit) : ''}</td>` +
             `<td class="${row.pass ? 'ok' : 'bad'}">${row.pass ? '通过' : '未通过'}</td></tr>`)
+            .join('');
+        /* P1/P3 报告增强：参数-结果对比（本实验 attempts 全历史） */
+        const attList = this._attemptList(r);
+        const attRows = attList.map((a, i) =>
+            `<tr class="${a.all_pass ? '' : 'bad'}">` +
+            `<td>${i + 1}</td>` +
+            `<td>${esc(String(a.ts || '').replace('T', ' '))}</td>` +
+            `<td>${this._attParamCell(a)}</td>` +
+            `<td>${this._attMetricsCell(a)}</td>` +
+            `<td>${a.score != null ? a.score : '—'}</td>` +
+            `<td class="${a.all_pass ? 'ok' : 'bad'}">` +
+            `${a.all_pass ? '通过' : '未通过'}</td></tr>`)
             .join('');
         /* 评分明细 */
         const scRows = (r.score_detail_full || r.score_detail || []).map((d) =>
@@ -1084,6 +1329,11 @@ ${theoryRows ? `<h3>理论预览（本组参数）</h3><table><tbody>${theoryRow
 <table><thead><tr><th>判据</th><th>理论值</th><th>实测值</th><th>判定</th></tr></thead>
 <tbody>${vRows}</tbody></table>
 <div class="concl"><b>结论：</b>${esc(r.conclusion)}</div>
+${attRows ? `<h3>参数-结果对比（本实验全部 ${attList.length} 次尝试）</h3>
+<table><thead><tr><th>#</th><th>时间</th><th>参数</th><th>关键指标</th><th>得分</th><th>判定</th></tr></thead>
+<tbody>${attRows}</tbody></table>` : ''}
+<h3>学生分析结论</h3>
+<div class="concl">${esc(analysis).replace(/\n/g, '<br>')}</div>
 ${quiz ? `<h3>预习测验（${quiz.n_correct}/${quiz.n_total} 正确，${quiz.score} 分）</h3>` : ''}
 ${stepRows ? `<h3>操作步骤日志</h3><table><thead><tr><th>步骤</th><th>名称</th><th>开始</th><th>结束</th><th>用时</th><th>满分</th><th>得分</th><th>考察点</th></tr></thead><tbody>${stepRows}</tbody></table>` : ''}
 ${qaRows ? `<h3>思考题作答</h3><table><thead><tr><th>题目</th><th>作答</th></tr></thead><tbody>${qaRows}</tbody></table>` : ''}
@@ -1139,6 +1389,13 @@ ${qaRows ? `<h3>思考题作答</h3><table><thead><tr><th>题目</th><th>作答<
     });
     document.getElementById('reportBtn').addEventListener('click', () =>
         lab.downloadReport());
+    /* 分析结论自动保存（按实验，报告下载必填） */
+    document.getElementById('anaText').addEventListener('input', () => {
+        if (!lab.current) return;
+        lab.analysis[lab.current.exp_id] =
+            document.getElementById('anaText').value;
+        lab._saveArchive();
+    });
     document.getElementById('submitBtn').addEventListener('click', () =>
         lab.submitReport());
     document.getElementById('rerunBtn').addEventListener('click', () => {

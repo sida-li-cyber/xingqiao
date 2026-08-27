@@ -8,10 +8,19 @@
   * 每实验附带 guide（目的/原理/步骤/思考题）与 topology
     （SVG 拓扑数据）随 simulation_init.experiments 下发，
     前端据此自动生成输入表单与实验台界面；
-  * 评分闭环（100 分制）：对账判定 70 + 参数探索 10 +
+  * 评分闭环（100 分制）：对账判定 70 + 参数扫描 10 +
     预习测验 10 + 思考题 10。run_experiment 返回的 score/
     score_detail 只含前两项（与仿真结果相关的部分），预习与思考题由
     grade_quiz / grade_questions 判分，compose_score 合成总分；
+  * 判据行可携带可选 weight（E8 诊断型 7/3/0）：对账分按权重分配；
+  * 参数扫描评分（P1）：E1~E7 各声明 sweep_key（最有教学意义的
+    数值参数），run_experiment 接受 prior_attempts（该学生本实验的
+    历史运行列表），按取值覆盖度档位给 0~10 分；结果携带 attempt
+    字段（本次运行摘要：params/score/all_pass/ts/metrics）供 edu
+    存档追加到 attempts[]；
+  * E9 设计型实验声明 pass_attempts：run_experiment 将 prior_attempts
+    透传给 runner，判据按「约束达标 + 迭代方案数」计分（探索分 0），
+    结果携带 targets（目标约束）与 history（方案对比表数据）；
   * 预习测验题库 QUIZZES：答案与解析仅在核心侧，经
     experiment_quiz 命令判分后回传（前端不下发答案）。
 
@@ -24,6 +33,11 @@
   E5 路由算法对比     最短时延路由拥塞丢包 (λ−C)/λ；负载感知绕行近零丢包
   E6 星座规模探索     网格 P×M：跳数 = (P−1) + ⌊M/2⌋，e2e = 11 + 8×跳数 ms
   E7 链路预算雨衰     Ka 波段雨衰 a dB → 容量 ×10^(−a/10)，丢包 = 1−C_eff/λ
+  E8 链路故障诊断     线性链 GS-A—S1—S4—GS-B：内部链路容量 ×0.15，
+                      探测流观测干净/劣化边界定位根因（诊断型，判据权重 7/3/0）
+  E9 星座设计         逆向设计型：目标约束 e2e ≤ 40 ms / 丢包 ≤ 1% /
+                      跳数 ≤ 4，迭代 P×M 与源速率逼近达标方案
+                      （判据权重 4/2/3/1，探索分 0 以达标判定计分）
 
 引擎接口约定（packet_sim.PacketEngine）：
 
@@ -37,6 +51,8 @@
 """
 
 import asyncio
+import re
+from datetime import datetime
 
 from packet_sim import (DEFAULT_CONFIG, PacketEngine, PRIO_BEST_EFFORT,
                         PRIO_HIGH)
@@ -67,6 +83,11 @@ def _sanitize_params(inputs, run_params):
     for f in inputs:
         k = f["key"]
         if k not in run_params:
+            continue
+        if f.get("type") in ("str", "text"):    # E8 文本型输入：仅清洗
+            v = run_params[k]
+            if v is not None:
+                p[k] = str(v).strip()
             continue
         cast = type(f["default"])
         try:
@@ -127,27 +148,92 @@ SCORE_MAX = {"verdict": 70, "explore": 10, "quiz": 10, "questions": 10}
 
 
 def _score_verdict(rows, max_pts=SCORE_MAX["verdict"]):
-    """逐行分档：判据通过拿满分行分；未通过但数值误差 ≤ 2×容差给半分。"""
+    """逐行分档：判据通过拿满分行分；未通过但数值误差 ≤ 2×容差给半分。
+
+    行可携带可选 ``weight``（默认 1.0）：总分按权重比例分配（E8 诊断型
+    判据 7 / 3 / 0）。weight ≤ 0 的行不参与分值分配、仅影响 all_pass；
+    无 weight 时逐行等分，行为与历史版本完全一致（E1~E7 不受影响）。
+    """
     if not rows:
         return 0.0
-    per = max_pts / len(rows)
+    total_w = 0.0
     got = 0.0
     for r in rows:
+        try:
+            w = float(r.get("weight", 1.0))
+        except (TypeError, ValueError):
+            w = 1.0
+        if w <= 0:
+            continue
+        total_w += w
         if r["pass"]:
-            got += per
+            got += w
             continue
         err, tol = r.get("error"), r.get("tolerance")
         if (isinstance(err, (int, float)) and isinstance(tol, (int, float))
                 and tol and abs(err) <= 2.0 * tol):
-            got += per * 0.5
-    return round(got, 1)
+            got += w * 0.5
+    if total_w <= 0:
+        return 0.0
+    return round(max_pts * got / total_w, 1)
 
 
-def _score_explore(inputs, params):
-    """参数探索分：改过任一默认参数并运行才得分（鼓励动手调参）。"""
-    defaults = _default_params(inputs)
-    changed = [k for k in defaults if params.get(k) != defaults[k]]
-    return SCORE_MAX["explore"] if changed else 0
+def _score_explore(spec, params, prior_attempts=None):
+    """参数扫描分（P1 评分诚实性修复，替代“改任一参数即满分”）。
+
+    每个实验声明 ``sweep_key``（最有教学意义的数值输入）；取值集合 =
+    当前值 ∪ 历史 attempts 中该 key 的有效值（可转 float 且落在输入
+    区间内）。档位（满分 10）：
+
+      * 默认值单次        0 分（未动手）；
+      * 非默认但仅 1 个取值 2 分；
+      * 2 个取值 4 分；3 个取值 6 分；
+      * ≥ 4 个取值且 (max−min) ≥ 40% 输入区间 10 分，跨度不足 8 分。
+
+    无 sweep_key 的实验（E8 诊断型 / E9 设计型）返回 0 分并在说明中
+    注明“以诊断/达标判定计分”。返回 (分数, 说明)。
+    """
+    key = spec.get("sweep_key")
+    if not key:
+        if spec.get("pass_attempts"):            # E9 设计型
+            return 0.0, "设计型实验以达标判定计分，不设参数扫描分"
+        return 0.0, "本实验以诊断判定计分，不设参数扫描分"
+    field = next((f for f in spec["inputs"] if f["key"] == key), None)
+    if field is None:
+        return 0.0, "实验未定义扫描参数"
+    lo, hi = float(field["min"]), float(field["max"])
+    default = float(field["default"])
+
+    values = set()
+
+    def _add(v):
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            return
+        if lo <= v <= hi:                     # 越界 / 非数值历史不计入
+            values.add(v)
+
+    _add(params.get(key))
+    for att in prior_attempts or []:
+        if isinstance(att, dict):
+            _add((att.get("params") or {}).get(key))
+
+    n = len(values)
+    if n == 0:
+        pts = 0.0
+    elif n == 1:
+        pts = 0.0 if next(iter(values)) == default else 2.0
+    elif n == 2:
+        pts = 4.0
+    elif n == 3:
+        pts = 6.0
+    elif (max(values) - min(values)) >= 0.4 * (hi - lo):
+        pts = SCORE_MAX["explore"]
+    else:
+        pts = 8.0
+    note = f"参数扫描：已覆盖 {n} 个取值（满分需 ≥4 个且覆盖区间 40%）"
+    return pts, note
 
 
 def _hop_summary(summary, nodes_metrics, src):
@@ -774,6 +860,333 @@ async def _run_e7(p, on_progress, cancel_check, seed=8):
 
 
 # ----------------------------------------------------------------------
+# E8 链路故障诊断（P0：观测 → 边界 → 假设 → 提交证据链）
+# ----------------------------------------------------------------------
+
+E8_INPUTS = [
+    {"key": "probes", "label": "探测节点", "type": "str", "default": "",
+     "tip": "逗号分隔 S1~S4，探测预算 3 个"},
+    {"key": "guess", "label": "根因链路", "type": "str", "default": "",
+     "tip": "填 L1~L5 之一"},
+    {"key": "evidence", "label": "证据链", "type": "text", "default": "",
+     "tip": "引用观测数据说明上游/下游对比"},
+]
+
+E8_NODES = ["GS-A", "S1", "S2", "S3", "S4", "GS-B"]   # 线性链 6 节点
+# 链路命名：L1=(GS-A,S1) … L5=(S4,GS-B)；故障只注入内部链路 L2/L3/L4
+#（edge 下标 1~3），fault 下标 = 1 + seed % 3，随种子确定性变化。
+E8_ISL_BPS = 2e6            # 链路容量 C ≈ 167 pps @1500 B
+E8_FAULT_FACTOR = 0.15      # 故障链路容量 ×0.15（模拟雨衰容量骤降）
+E8_MAIN_PPS = 100.0         # 主业务 λ：0.15C(25pps) < λ < C(167pps)
+E8_PROBE_PPS = 5.0          # 监视流 ≈ 主流量 5%，不改变拥塞状态
+E8_LINK_MS = 4.0            # 每条链路传播时延
+E8_DEGRADED_LOSS_PCT = 20.0  # 干净/劣化分界判别门限
+
+
+def _e8_parse_probes(raw):
+    """解析探测节点：逗号/空白分隔，去重，仅接受 S1~S4，按链路顺序。"""
+    valid = {"S1", "S2", "S3", "S4"}
+    seen = {t.strip().upper() for t in
+            re.split(r"[\s,，;；]+", str(raw or ""))} & valid
+    return [f"S{i}" for i in range(1, 5) if f"S{i}" in seen]
+
+
+def _e8_parse_guess(raw):
+    """归一化根因提交：L3 / l3 / 3 → "L3"；非法输入返回空串。"""
+    g = str(raw or "").strip().upper()
+    if g.isdigit():
+        g = "L" + g
+    return g if g in {"L1", "L2", "L3", "L4", "L5"} else ""
+
+
+async def _run_e8(p, on_progress, cancel_check, seed=8):
+    def prog(stage, frac, note=""):
+        if on_progress:
+            on_progress({"stage": stage, "progress": frac, "note": note})
+
+    # 固定种子确定性注入内部链路故障（考核模式经 _seed 覆盖）。
+    fault_idx = 1 + seed % 3                    # edge 下标 → L2/L3/L4
+    fault_link = f"L{fault_idx + 1}"
+    probe_nodes = _e8_parse_probes(p["probes"])
+    guess = _e8_parse_guess(p["guess"])
+    evidence = str(p["evidence"] or "").strip()
+
+    # 拓扑：线性链；故障链路独享 "bn" 容量（C×0.15），其余链路 2 Mbps。
+    # 每个被探测节点挂一个虚拟源（probe-Sk）—GS-A 接入抽头，监视流
+    # 与主业务同路经：路径未过故障段丢包≈0，穿过故障段丢包高。
+    eng = _mk_engine(seed=seed,
+                     capacity_extra={"isl": E8_ISL_BPS,
+                                     "bn": E8_ISL_BPS * E8_FAULT_FACTOR})
+    edges = [(E8_NODES[i], E8_NODES[i + 1],
+              "bn" if i == fault_idx else "isl", E8_LINK_MS / 1000.0)
+             for i in range(5)]
+    taps = [f"probe-{n}" for n in probe_nodes]
+    for tap in taps:
+        edges.append((tap, "GS-A", "isl", 0.001))
+    eng.sync_topology(E8_NODES + taps, edges, transit=E8_NODES[:5])
+    flows = {"GS-A": "GS-B"}
+    rates = {"GS-A": E8_MAIN_PPS}
+    for n, tap in zip(probe_nodes, taps):
+        flows[tap] = n
+        rates[tap] = E8_PROBE_PPS
+    eng.sync_flows(flows, rates)
+
+    prog("warmup", 0.25, f"预热 15 s（部署 {len(probe_nodes)} 个探测监视流）")
+    await _advance(eng, 15.0, cancel_check)
+    eng.snapshot(0.0)                           # 清窗，丢弃预热期统计
+    base_sent = {tap: eng.n_generated[tap] for tap in taps}
+    base_recv = {n: eng.n_delivered[n] for n in probe_nodes}
+
+    prog("measuring", 0.85, "测量窗 30 s")
+    await _advance(eng, 45.0, cancel_check)
+    snap = eng.snapshot(30.0)
+    nm = snap["nodes"]
+
+    observations = []
+    for n, tap in zip(probe_nodes, taps):
+        sent = eng.n_generated[tap] - base_sent[tap]
+        recv = eng.n_delivered[n] - base_recv[n]
+        loss = 1.0 - recv / sent if sent else 0.0
+        observations.append({
+            "node": n,
+            "loss_pct": round(loss * 100.0, 1),
+            "e2e_ms": round(nm.get(tap, {}).get("e2e_latency_ms", 0.0), 1),
+            "pkts_sent": sent,
+            "pkts_dropped": sent - recv,
+        })
+
+    # 观测边界（不点名故障链路）：干净/劣化分界由探测数据呈现
+    degraded = [o["node"] for o in observations
+                if o["loss_pct"] >= E8_DEGRADED_LOSS_PCT]
+    clean = [o["node"] for o in observations
+             if o["loss_pct"] < E8_DEGRADED_LOSS_PCT]
+    if not probe_nodes:
+        concl = ("未部署探测节点：无观测数据。请在 probes 填写逗号分隔的"
+                 "探测节点（如 S2,S4，预算 3 个）重跑，再提交根因假设。")
+    elif not degraded:
+        concl = ("全部探测节点干净（丢包≈0）：故障位于探测覆盖之外的"
+                 "链路段，请向未覆盖的下游扩大探测范围后重跑。")
+    elif not clean:
+        first = degraded[0]
+        worst = max(o["loss_pct"] for o in observations)
+        concl = (f"全部探测节点劣化（最高丢包 {worst:.0f}%）：观测边界位于"
+                 f"首个被探测节点 {first} 的上游——故障在被覆盖路径的"
+                 "前段，请补探更靠前的节点收紧边界。")
+    else:
+        c_last = clean[-1]
+        d_first = degraded[0]
+        c_loss = next(o["loss_pct"] for o in observations
+                      if o["node"] == c_last)
+        d_loss = next(o["loss_pct"] for o in observations
+                      if o["node"] == d_first)
+        concl = (f"观测边界：{c_last} 干净（丢包 {c_loss:.1f}%），"
+                 f"{d_first} 起劣化（丢包 {d_loss:.1f}%、时延陡增）——"
+                 "根因位于两节点分界的路径段，请对照 L1~L5 提交假设。")
+
+    hit = guess == fault_link
+    ev_keywords = ("上游", "下游", "对比")
+    ev_ok = bool(evidence) and (
+        any(kw in evidence for kw in ev_keywords)
+        or any(n in evidence for n in probe_nodes))
+    n_probes = len(probe_nodes)
+    rows = [
+        {"label": "根因链路定位",
+         "theory": "与注入故障一致" if hit else "由观测边界推断",
+         "measured": guess or "未提交", "unit": "",
+         "error": None, "tolerance": None, "pass": hit, "weight": 7.0,
+         **({} if hit else
+            {"hint": "对比干净/劣化节点的分界，重新定位"})},
+        {"label": "证据链完整性", "theory": "引用上游/下游/对比或探测节点",
+         "measured": ("已提交且含对比表述" if ev_ok else
+                      ("已提交但缺对比/节点引用" if evidence else "未提交")),
+         "unit": "", "error": None, "tolerance": None, "pass": ev_ok,
+         "weight": 3.0},
+        {"label": "探测预算（≤3 个节点）", "theory": "≤ 3",
+         "measured": n_probes, "unit": "个",
+         "error": None, "tolerance": None, "pass": n_probes <= 3,
+         "weight": 0.0},
+    ]
+    ok = _rows_pass(rows)
+    if not hit and probe_nodes:
+        concl += " 根因未命中：对比干净/劣化节点的分界，重新定位。"
+    return {"verdict": rows, "all_pass": ok, "conclusion": concl,
+            "observations": observations}
+
+
+# ----------------------------------------------------------------------
+# E9 星座设计（P2 逆向设计性：给定目标约束，迭代 P×M/速率逼近达标方案）
+# ----------------------------------------------------------------------
+
+# 目标约束（达标线，随 guide 与 result.targets 下发，前端可见）
+E9_TARGETS = {
+    "e2e_max_ms": 40.0,      # 端到端时延上限
+    "loss_max": 0.01,        # 丢包率上限（1%）
+    "hops_max": 4,           # ISL 跳数上限（鼓励紧凑设计）
+}
+
+E9_INPUTS = [
+    {"key": "planes", "label": "轨道平面数 P", "type": "int", "min": 1, "max": 5,
+     "step": 1, "default": 2, "unit": "个", "tip": "设计变量：轨道平面维度"},
+    {"key": "sats_per_plane", "label": "每平面卫星数 M", "type": "int", "min": 2,
+     "max": 8, "step": 1, "default": 4, "unit": "颗",
+     "tip": "设计变量：同平面相位维度"},
+    {"key": "src_pps", "label": "源速率", "type": "float", "min": 100, "max": 400,
+     "step": 20, "default": 200, "unit": "pps", "tip": "业务源速率（保持轻载）"},
+]
+
+# 判据 label -> history 提取键（历史 attempt.metrics 以判据 label 为键）
+_E9_E2E_LABEL = "时延达标 e2e ≤ 40 ms"
+_E9_HOPS_LABEL = "跳数紧凑 hops ≤ 4"
+
+
+def _e9_hist_entry(att):
+    """从历史 attempt 提取方案对比条目（缺 e2e/hops 指标时省略该字段）。"""
+    if not isinstance(att, dict):
+        return None
+    params = att.get("params") or {}
+    if "planes" not in params or "sats_per_plane" not in params:
+        return None
+    metrics = att.get("metrics") or {}
+    entry = {
+        "planes": params.get("planes"),
+        "sats_per_plane": params.get("sats_per_plane"),
+        "src_pps": params.get("src_pps"),
+    }
+    if att.get("score") is not None:
+        entry["score"] = att["score"]
+
+    def _metric(*keys):
+        for k in keys:
+            v = metrics.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                return v
+        return None
+
+    e2e = _metric("e2e_ms", _E9_E2E_LABEL)
+    if e2e is not None:
+        entry["e2e_ms"] = round(float(e2e), 1)
+    hops = _metric("hops", _E9_HOPS_LABEL)
+    if hops is not None:
+        entry["hops"] = int(hops)
+    return entry
+
+
+async def _run_e9(p, on_progress, cancel_check, seed=9, prior_attempts=None):
+    def prog(stage, frac, note=""):
+        if on_progress:
+            on_progress({"stage": stage, "progress": frac, "note": note})
+
+    planes, m = p["planes"], p["sats_per_plane"]
+    hops = (planes - 1) + m // 2               # 曼哈顿最短路（E6 同式）
+
+    # 拓扑：E6 网格引擎同款。GS-A 接入左下 S0_0，GS-B 下行挂右上
+    # S{P-1}_{M//2}，跳数 = (P−1) + ⌊M/2⌋（环内走短弧）。
+    sats = [f"S{q}_{r}" for q in range(planes) for r in range(m)]
+    nodes = ["GS-A", "GS-B"] + sats
+    edges = []
+    for q in range(planes):
+        for r in range(m):
+            edges.append((f"S{q}_{r}", f"S{q}_{(r + 1) % m}", "isl",
+                          E6_ISL_MS / 1000.0))
+            if q + 1 < planes:                       # 平面链（不闭合）
+                edges.append((f"S{q}_{r}", f"S{q + 1}_{r}", "isl",
+                              E6_ISL_MS / 1000.0))
+    edges.append(("GS-A", "S0_0", "sul", E6_ACCESS_MS / 1000.0))
+    edges.append((f"S{planes - 1}_{m // 2}", "GS-B", "gsl",
+                  E6_DOWN_MS / 1000.0))
+
+    # ISL 容量沿用 E6 默认设定：源速率 ≤ 400 pps 保持轻载，
+    # 正常设计零丢包，丢包判据随实测判定（速率逼近容量才拥塞）。
+    eng = _mk_engine(seed=seed)
+    eng.sync_topology(nodes, edges, transit=sats)
+    eng.sync_flows({"GS-A": "GS-B"}, {"GS-A": float(p["src_pps"])})
+
+    prog("warmup", 0.25, f"{planes}×{m} 设计方案（{planes * m} 星）部署")
+    await _advance(eng, 10.0, cancel_check)
+    base_sent = eng.n_generated["GS-A"]
+    base_drop = eng.total_dropped
+    prog("measuring", 0.9, "30 s 测量窗（验证时延与丢包达标性）")
+    await _advance(eng, 40.0, cancel_check)
+    s = eng.snapshot(30.0)["summary"]
+    sent = eng.n_generated["GS-A"] - base_sent
+    drop = eng.total_dropped - base_drop
+    loss = drop / sent if sent else 0.0
+    e2e = s["avg_e2e_latency_ms"]
+
+    # 设计迭代：历史 attempts 中不同 (P, M) 组合数 + 本次
+    combos = {(planes, m)}
+    for att in prior_attempts or []:
+        if not isinstance(att, dict):
+            continue
+        ap = att.get("params") or {}
+        try:
+            combos.add((int(ap["planes"]), int(ap["sats_per_plane"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    n_combos = len(combos)
+
+    ok_e2e = e2e <= E9_TARGETS["e2e_max_ms"]
+    ok_loss = loss <= E9_TARGETS["loss_max"]
+    ok_hops = hops <= E9_TARGETS["hops_max"]
+    ok_iter = n_combos >= 3
+    rows = [
+        {"label": _E9_E2E_LABEL, "theory": "≤ 40",
+         "measured": round(e2e, 1), "unit": "ms",
+         "error": None, "tolerance": None, "pass": ok_e2e, "weight": 4.0},
+        {"label": "丢包达标 loss ≤ 1%", "theory": "≤ 1%",
+         "measured": round(loss * 100.0, 2), "unit": "%",
+         "error": None, "tolerance": None, "pass": ok_loss, "weight": 2.0},
+        {"label": _E9_HOPS_LABEL, "theory": "≤ 4",
+         "measured": hops, "unit": "跳",
+         "error": None, "tolerance": None, "pass": ok_hops, "weight": 3.0},
+        {"label": "设计迭代 ≥ 3 次不同方案", "theory": "≥ 3 组",
+         "measured": n_combos, "unit": "组",
+         "error": None, "tolerance": None, "pass": ok_iter, "weight": 1.0,
+         **({} if ok_iter else
+            {"hint": "多尝试几组不同 P×M 组合，再提交最终方案"})},
+    ]
+
+    # 方案对比历史：prior_attempts（含 params 者）+ 本次（末位），供前端对比表
+    history = [e for e in map(_e9_hist_entry, prior_attempts or []) if e]
+    history.append({
+        "planes": planes, "sats_per_plane": m, "src_pps": p["src_pps"],
+        "e2e_ms": round(e2e, 1), "hops": hops, "score": None,
+    })
+
+    # conclusion：实测与达标线差距 + 迭代引导（不直接给最优解）
+    n_perf = sum((ok_e2e, ok_loss, ok_hops))
+    d_e2e = e2e - E9_TARGETS["e2e_max_ms"]
+    concl = (f"本次设计 {planes}×{m}（{planes * m} 星、{hops} 跳）："
+             f"e2e {e2e:.1f} ms（目标 ≤ 40，"
+             + ("超出 " if d_e2e > 0 else "余量 ")
+             + f"{abs(d_e2e):.1f} ms）、丢包 {loss:.1%}（目标 ≤ 1%）、"
+             f"跳数 {hops}（目标 ≤ 4）——性能约束 {n_perf}/3 项达标。")
+    if n_perf == 3:
+        concl += "方案满足全部性能约束。"
+        if not ok_iter:
+            concl += (f"已尝试 {n_combos} 组不同 P×M——多尝试几组不同组合，"
+                      "在达标方案中对比择优。")
+    else:
+        tips = []
+        if not ok_e2e:
+            tips.append("时延超出：e2e = 11 + 8×跳数，"
+                        "压缩 (P−1)+⌊M/2⌋ 的跳数即可降低时延")
+        if not ok_loss:
+            tips.append("丢包超出：源速率已造成拥塞，下调源速率保持轻载")
+        if not ok_hops:
+            tips.append("跳数超出：更紧凑的 P×M 布局可同时压低跳数与时延")
+        concl += "迭代引导：" + "；".join(tips) + "。"
+        if not ok_iter:
+            concl += "多尝试几组不同 P×M 组合，观察各方案与达标线的差距。"
+
+    ok = _rows_pass(rows)
+    return {"verdict": rows, "all_pass": ok, "conclusion": concl,
+            "targets": dict(E9_TARGETS), "history": history,
+            "measured": {"e2e_ms": e2e, "loss": loss, "hops": hops,
+                         "sent": sent, "drop": drop}}
+
+
+# ----------------------------------------------------------------------
 # 实验注册表（含 guide / topology，随 catalog 下发给前端实验台）
 # ----------------------------------------------------------------------
 
@@ -784,6 +1197,7 @@ EXPERIMENTS = {
         "difficulty": "入门", "minutes": 45,
         "theory_note": "e2e ≈ 21 ms(传播) + 发送时延(随包长)",
         "inputs": E1_INPUTS, "runner": _run_e1, "theory": _e1_theory,
+        "sweep_key": "pps",
         "guide": {
             "objective": "掌握端到端时延的两个物理分量（传播 / 发送），"
                          "理解轻载链路下排队项趋近于零的工程近似。",
@@ -814,6 +1228,7 @@ EXPERIMENTS = {
         "difficulty": "基础", "minutes": 45,
         "theory_note": "Wq = ρs/2(1−ρ)，e2e ≈ 传播6 + 服务6 + Wq",
         "inputs": E2_INPUTS, "runner": _run_e2, "theory": _e2_theory,
+        "sweep_key": "rho",
         "guide": {
             "objective": "验证 M/D/1 平均排队时延公式（Pollaczek–Khinchine 特例），"
                          "掌握“预热 + 测量窗”的稳态仿真方法学。",
@@ -844,6 +1259,7 @@ EXPERIMENTS = {
         "difficulty": "进阶", "minutes": 45,
         "theory_note": "尖峰 = Q(队列) + 1(在途) = 201 包",
         "inputs": E3_INPUTS, "runner": _run_e3, "theory": _e3_theory,
+        "sweep_key": "src_pps",
         "guide": {
             "objective": "理解 LEO 卫星高速运动导致链路切换的丢包机理，"
                          "定量推导切换尖峰并区分 handover / congestion 口径。",
@@ -876,6 +1292,7 @@ EXPERIMENTS = {
         "difficulty": "进阶", "minutes": 45,
         "theory_note": "总负载 > 容量 ⇒ 拥塞；HIGH 始终先发",
         "inputs": E4_INPUTS, "runner": _run_e4, "theory": _e4_theory,
+        "sweep_key": "low_pps",
         "guide": {
             "objective": "观察严格优先级调度在拥塞下的保护作用与代价，"
                          "理解 QoS 保障的边界：优先级不创造容量。",
@@ -906,6 +1323,7 @@ EXPERIMENTS = {
         "difficulty": "进阶", "minutes": 45,
         "theory_note": "λ > 捷径容量：最短时延丢 (λ−C)/λ，负载感知绕行近零",
         "inputs": E5_INPUTS, "runner": _run_e5, "theory": _e5_theory,
+        "sweep_key": "src_pps",
         "guide": {
             "objective": "理解静态最短路径路由在拥塞下的局限，"
                          "以及负载感知（拥塞敏感）路由如何用少量传播时延"
@@ -941,6 +1359,7 @@ EXPERIMENTS = {
         "difficulty": "基础", "minutes": 45,
         "theory_note": "规模决定路径跳数；环内取短弧使时延随 M 减半增长",
         "inputs": E6_INPUTS, "runner": _run_e6, "theory": _e6_theory,
+        "sweep_key": "sats_per_plane",
         "guide": {
             "objective": "把 Walker 星座抽象为网格拓扑，理解轨道平面数 P 与"
                          "每平面卫星数 M 两个维度如何决定端到端路径跳数与时延。",
@@ -973,6 +1392,7 @@ EXPERIMENTS = {
         "difficulty": "进阶", "minutes": 45,
         "theory_note": "晴天 83 kpps；10 dB 雨衰只剩 8.3 kpps",
         "inputs": E7_INPUTS, "runner": _run_e7, "theory": _e7_theory,
+        "sweep_key": "rain_db",
         "guide": {
             "objective": "理解链路预算中功率余量与天气衰减的博弈，"
                          "定量计算雨衰导致的容量降级与可用性门限。",
@@ -995,6 +1415,93 @@ EXPERIMENTS = {
                       {"id": "GS", "type": "gs"}],
             "edges": [{"a": "UAV", "b": "Sat", "label": "SUL 3ms"},
                       {"a": "Sat", "b": "GS", "label": "GSL 6ms（受雨衰）"}],
+        },
+    },
+    "E8": {
+        "id": "E8", "name": "链路故障诊断",
+        "summary": "隐蔽链路故障（容量骤降 ×0.15）：凭探测观测定位根因",
+        "difficulty": "进阶", "minutes": 45,
+        "theory_note": "上游探测干净、下游劣化——干净/劣化分界即根因",
+        "inputs": E8_INPUTS, "runner": _run_e8,
+        "guide": {
+            "objective": "在含单一隐蔽故障（雨衰致内部链路容量骤降至 15%）"
+                         "的沙箱链路中，仅凭受控探测的丢包与时延观测定位"
+                         "根因链路，训练「观测 → 边界 → 假设 → 提交证据」"
+                         "的故障定位方法学。",
+            "principle": "线性链 GS-A—S1—S2—S3—S4—GS-B（链路 L1~L5），\n"
+                         "其中一条内部链路（L2/L3/L4 之一，由运行种子决定）\n"
+                         "容量被压至 15%。\n"
+                         "主业务 GS-A→GS-B 速率 λ 介于 0.15C 与 C 之间：\n"
+                         "只有故障链路拥塞，其余链路畅通。\n"
+                         "探测 = 向目的节点布设低速率监视流（约主流量 5%，\n"
+                         "不改变拥塞状态）：路径未穿过故障段的探测丢包≈0、\n"
+                         "时延正常；穿过故障段的探测丢包高、时延陡增。\n"
+                         "干净/劣化分界所在的那一跳 = 根因链路。",
+            "steps": ["第一阶段·观测：在 probes 填 1~3 个探测节点"
+                      "（如 S2,S4），运行实验读取各节点丢包率与时延",
+                      "定位边界：找出丢包≈0 与丢包高的相邻探测节点分界",
+                      "第二阶段·提交：在 guess 填根因链路（L1~L5 之一）",
+                      "在 evidence 写证据链：引用上游/下游观测数据对比",
+                      "核对对账表；未命中则按引导语调整探测组合重试",
+                      "下载报告并回答思考题"],
+            "questions": ["监视流速率为什么必须远小于主业务速率？"
+                          "探测流量过大会对诊断造成什么影响？",
+                          "若全部探测节点都干净（丢包≈0），能得出什么结论？"
+                          "下一步应如何扩大排查范围？"],
+        },
+        "topology": {
+            "nodes": [{"id": "GS-A", "type": "gs"}, {"id": "S1", "type": "sat"},
+                      {"id": "S2", "type": "sat"}, {"id": "S3", "type": "sat"},
+                      {"id": "S4", "type": "sat"}, {"id": "GS-B", "type": "gs"}],
+            "edges": [{"a": "GS-A", "b": "S1", "label": "L1"},
+                      {"a": "S1", "b": "S2", "label": "L2"},
+                      {"a": "S2", "b": "S3", "label": "L3"},
+                      {"a": "S3", "b": "S4", "label": "L4"},
+                      {"a": "S4", "b": "GS-B", "label": "L5"}],
+            "grid_hint": "内部链路 L2/L3/L4 之一存在隐蔽容量故障（种子决定）",
+        },
+    },
+    "E9": {
+        "id": "E9", "name": "星座设计（逆向设计性实验）",
+        "summary": "给定目标约束（e2e ≤ 40 ms / 丢包 ≤ 1% / 跳数 ≤ 4），"
+                   "迭代 P×M 与源速率设计达标星座",
+        "difficulty": "进阶", "minutes": 45,
+        "theory_note": "逆向设计：跳数 = (P−1) + ⌊M/2⌋，e2e = 11 + 8×跳数 ms",
+        "inputs": E9_INPUTS, "runner": _run_e9, "pass_attempts": True,
+        "guide": {
+            "objective": "逆向设计方法学训练：给定端到端性能约束，"
+                         "从「目标 → 约束换算 → 参数空间搜索 → 迭代验证」"
+                         "设计并提交满足全部约束的星座方案，体会规模与时延、"
+                         "负载与丢包之间的工程权衡。",
+            "principle": "目标约束（达标线）：\n"
+                         "  · 端到端时延 e2e ≤ 40 ms\n"
+                         "  · 丢包率 loss ≤ 1%（轻载设计）\n"
+                         "  · ISL 跳数 hops ≤ 4（鼓励紧凑设计）\n"
+                         "网格模型（同 E6）：同平面星间链路成环、跨平面相邻"
+                         "连接，GS-A 接入左下 (0,0)、GS-B 挂右上 (P−1, M/2)。\n"
+                         "最短跳数 = (P−1) + ⌊M/2⌋（环内取短弧）；\n"
+                         "e2e = 接入 5 + 跳数×ISL 8 + 下行 6 ms。\n"
+                         "逆向设计：先把时延预算换算成跳数预算，再反推"
+                         "可行 (P, M) 区域，用多组运行验证并对比择优。",
+            "steps": ["阅读目标约束与网格跳数-时延模型",
+                      "由时延预算 40−11 = 29 ms 推算可行跳数范围",
+                      "拟定第一组 P×M 方案运行，对照判据找差距",
+                      "按结论区引导迭代：换不同 P×M（或源速率）重跑，"
+                      "累计 ≥3 组不同方案",
+                      "在「方案对比」表中选择满足全部约束的方案提交",
+                      "填写分析结论，下载报告并回答思考题"],
+            "questions": ["满足全部约束的 (P, M) 组合是否唯一？"
+                          "在达标方案中你如何权衡星数（成本）与时延余量？",
+                          "把源速率从 200 提到 400 pps，轻载假设还成立吗？"
+                          "丢包与时延判据哪个会先失守？"],
+        },
+        "topology": {
+            "nodes": [{"id": "GS-A", "type": "gs"}, {"id": "S", "type": "sat"},
+                      {"id": "GS-B", "type": "gs"}],
+            "edges": [{"a": "GS-A", "b": "S", "label": "接入 5ms"},
+                      {"a": "S", "b": "S", "label": "网格 ISL 8ms/跳"},
+                      {"a": "S", "b": "GS-B", "label": "下行 6ms"}],
+            "grid_hint": "P×M 网格按设计参数动态生成，此处为示意",
         },
     },
 }
@@ -1130,6 +1637,45 @@ QUIZZES = {
          "answer": 0,
          "explain": "轨道高度不可低到对流层；ACM/余量/频段切换都是常规手段。"},
     ],
+    "E8": [
+        {"q": "探测监视流的速率为什么必须远小于主业务速率？",
+         "options": ["避免探测流量本身改变拥塞状态（无扰观测）",
+                     "速率大了仿真引擎跑不动", "协议对探测包有限速",
+                     "探测包比业务包更小"],
+         "answer": 0,
+         "explain": "探测的意义在于不改变系统行为的前提下取样观测，"
+                    "否则观测到的拥塞可能由探测自身引入。"},
+        {"q": "干净/劣化分界（上游丢包≈0、下游丢包高）说明故障位于？",
+         "options": ["分界相邻两节点之间的那段链路", "最下游的接收节点",
+                     "业务源节点", "与分界无关的随机位置"],
+         "answer": 0,
+         "explain": "上游路径未受影响、下游路径劣化，根因在分界链路段——"
+                    "分段排查（bisect）的基本原理。"},
+        {"q": "若所有探测节点丢包均≈0，最合理的下一步是？",
+         "options": ["向未被覆盖的链路段扩大探测范围", "直接随机猜一个答案",
+                     "成倍加大探测速率再跑", "放弃本次诊断"],
+         "answer": 0,
+         "explain": "全部干净说明故障在探测覆盖之外（如未探测的下游段），"
+                    "应先扩大覆盖再收紧边界。"},
+    ],
+    "E9": [
+        {"q": "目标约束 e2e ≤ 40 ms 下（e2e = 11 + 8×跳数），"
+              "理论跳数最多能取多少？",
+         "options": ["3 跳（时延预算 (40−11)/8 = 3.6 → 跳数 ≤ 3）", "4 跳",
+                     "5 跳", "跳数与时延无关"],
+         "answer": 0,
+         "explain": "逆向设计第一步：把性能指标换算成设计预算。"
+                    "时延约束隐含跳数 ≤ 3，比显式跳数约束 ≤4 更紧，"
+                    "两者的交集才是达标区。"},
+        {"q": "关于逆向（设计性）实验，下列说法正确的是？",
+         "options": ["满足全部约束的方案可能不止一组，需迭代对比择优",
+                     "存在唯一最优解，系统会直接给出",
+                     "迭代次数越多扣分越多",
+                     "只需运行一次默认参数即可拿满判定分"],
+         "answer": 0,
+         "explain": "设计空间是多解的：达标区内还有星数（成本）与时延余量的"
+                    "取舍；判据同时要求 ≥3 组不同方案的迭代探索。"},
+    ],
 }
 
 
@@ -1205,11 +1751,14 @@ def experiment_catalog():
 
 
 async def run_experiment(exp_id, run_params=None, on_progress=None,
-                         cancel_check=None):
+                         cancel_check=None, prior_attempts=None):
     """在沙箱中运行指定实验；run_params 越界自动夹紧到 Schema 范围。
 
     保留键 ``_seed``（考核模式由核心下发）覆盖该实验的默认随机种子；
-    其余非 Schema 键被忽略。
+    其余非 Schema 键被忽略。``prior_attempts`` 为该学生本实验的历史
+    运行列表（edu 存档 attempts[] 的回传：[{params, score, ...}]），
+    用于参数扫描覆盖度计分。结果携带 ``attempt`` 字段（本次运行摘要）
+    供前端随 records 存档追加。
     """
     spec = EXPERIMENTS.get(exp_id)
     if spec is None:
@@ -1222,28 +1771,48 @@ async def run_experiment(exp_id, run_params=None, on_progress=None,
         except (TypeError, ValueError):
             seed = None
     try:
+        # E9 设计型声明 pass_attempts：runner 需要历史方案列表
+        #（迭代次数判据 / history 对比表）；其余实验不透传，签名不变。
+        extra = {"prior_attempts": prior_attempts} \
+            if spec.get("pass_attempts") else {}
         if seed is None:
-            out = await spec["runner"](params, on_progress, cancel_check)
+            out = await spec["runner"](params, on_progress, cancel_check,
+                                       **extra)
         else:
             out = await spec["runner"](params, on_progress, cancel_check,
-                                       seed=seed)
+                                       seed=seed, **extra)
     except ExperimentCancelled:
         raise
     v_pts = _score_verdict(out["verdict"])
-    e_pts = _score_explore(spec["inputs"], params)
+    e_pts, explore_note = _score_explore(spec, params, prior_attempts)
+    total = round(v_pts + e_pts, 1)
+    # P1 attempts 存档：本次运行摘要（前 3 个数值型判据 measured 入 metrics）
+    metrics = {}
+    for r in out["verdict"]:
+        if len(metrics) >= 3:
+            break
+        m = r.get("measured")
+        if isinstance(m, (int, float)) and not isinstance(m, bool):
+            metrics[r["label"]] = m
     result = {
         "exp_id": exp_id, "name": spec["name"], "summary": spec["summary"],
         "theory_note": spec["theory_note"],
         "params_used": params,
         "verdict": out["verdict"], "conclusion": out["conclusion"],
         "all_pass": out["all_pass"],
-        "score": round(v_pts + e_pts, 1),
+        "score": total,
         "score_detail": [
             {"item": "对账判定", "max": SCORE_MAX["verdict"], "score": v_pts},
             {"item": "参数探索", "max": SCORE_MAX["explore"], "score": e_pts,
-             "note": ("使用非默认参数运行" if e_pts else
-                      "默认参数运行，改动参数重跑可获探索分")},
+             "note": explore_note},
         ],
+        "attempt": {
+            "params": params,
+            "score": total,
+            "all_pass": bool(out["all_pass"]),
+            "ts": datetime.now().isoformat(timespec="seconds"),
+            "metrics": metrics,
+        },
     }
     for key, val in out.items():
         if key not in result:

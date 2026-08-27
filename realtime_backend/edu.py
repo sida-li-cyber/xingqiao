@@ -7,7 +7,8 @@
   tokens:  {token: student_id}          # 会话令牌（重启后仍有效）
   records: [{id, student_id, name, exp_id, exp_name, ts, status,
              score, score_detail, verdict, conclusion, params_used,
-             steps, quiz, questions, review}]
+             steps, quiz, questions, review,
+             attempts: [{params, score, all_pass, ts, metrics}]}]
 
 记录状态流转：draft（自动存档）→ submitted（学生提交报告）；
 教师可对记录填写评语与主观分（review），总评 = (自动分 + 主观分)/2，
@@ -101,7 +102,11 @@ class EduStore:
     # 实验记录
     # ------------------------------------------------------------------
     def add_record(self, user: dict, payload: dict) -> dict:
-        """保存一次实验的完整记录（参数/对账/评分/步骤日志/作答）。"""
+        """保存一次实验的完整记录（参数/对账/评分/步骤日志/作答）。
+
+        payload 携带 ``attempt``（run_experiment 结果中的本次运行摘要）
+        时追加到该记录的 ``attempts[]``；旧调用方不带此字段时为空列表。
+        """
         exp_id = str(payload.get("exp_id") or "").strip()
         if not exp_id:
             raise ValueError("exp_id is required")
@@ -125,11 +130,15 @@ class EduStore:
             "duration_s": float(payload.get("duration_s", 0) or 0),
             "exam_id": str(payload.get("exam_id", "")),
             "review": None,
+            "attempts": [],
         }
+        attempt = payload.get("attempt")
+        if isinstance(attempt, dict):
+            rec["attempts"].append(attempt)
         with self._lock:
             self._db["records"].append(rec)
             self._flush()
-        return dict(rec)
+        return _with_attempts(rec)
 
     def _find(self, rec_id: str) -> dict | None:
         for rec in self._db["records"]:
@@ -140,16 +149,16 @@ class EduStore:
     def get_record(self, rec_id: str) -> dict | None:
         with self._lock:
             rec = self._find(rec_id)
-            return dict(rec) if rec else None
+            return _with_attempts(rec) if rec else None
 
     def records_of(self, student_id: str) -> list[dict]:
         with self._lock:
-            return [dict(r) for r in self._db["records"]
+            return [_with_attempts(r) for r in self._db["records"]
                     if r["student_id"] == student_id]
 
     def all_records(self) -> list[dict]:
         with self._lock:
-            return [dict(r) for r in self._db["records"]]
+            return [_with_attempts(r) for r in self._db["records"]]
 
     def submit_record(self, rec_id: str, student_id: str) -> dict | None:
         with self._lock:
@@ -358,3 +367,10 @@ def _top_labels(labels: list[str]) -> list[dict]:
     from collections import Counter
     c = Counter(labels)
     return [{"label": lbl, "count": cnt} for lbl, cnt in c.most_common(3)]
+
+
+def _with_attempts(rec: dict) -> dict:
+    """旧记录无 attempts 字段时按空列表返回（向后兼容）。"""
+    out = dict(rec)
+    out.setdefault("attempts", [])
+    return out
